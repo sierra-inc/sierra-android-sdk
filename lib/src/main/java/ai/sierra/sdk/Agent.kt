@@ -2,17 +2,21 @@
 
 package ai.sierra.sdk
 
+import android.os.Parcelable
+import kotlinx.parcelize.Parcelize
+
 /**
  * Configuration for an agent in the SDK.
  *
  * @property token Token that identifies the agent.
  * @property apiHost Optional override for the Sierra API endpoint; if not provided, a default is used.
  */
+@Parcelize
 data class AgentConfig(
     val token: String,
     var apiHost: AgentAPIHost = AgentAPIHost.PROD
-) {
-    internal val url get() = "https://${apiHost.hostname}/agent/${token}/chat"
+): Parcelable {
+    internal val url get() = "https://${apiHost.hostname}/agent/${token}/android"
 }
 enum class AgentAPIHost(val hostname: String, val displayName: String) {
     PROD("sierra.chat", "Prod"),
