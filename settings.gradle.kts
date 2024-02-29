@@ -1,9 +1,20 @@
 // Copyright Sierra
 
-plugins {
-    id("com.android.library") version "8.2.2"
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
 }
 
 rootProject.name = "SierraSDK"
 
-include(":")
+include(":lib")
