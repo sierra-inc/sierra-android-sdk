@@ -149,6 +149,7 @@ class AgentChatFragment : Fragment() {
         if (savedInstanceState != null && savedInstanceState.getBoolean("pageLoaded")) {
             val savedInstanceArgs = savedInstanceState.getParcelable<AgentChatFragmentArgs>("args")
             if (savedInstanceArgs == args) {
+                pageLoaded = true
                 webView.restoreState(savedInstanceState)
                 return
             }
