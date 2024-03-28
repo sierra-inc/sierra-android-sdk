@@ -20,6 +20,11 @@ data class ConversationOptions(
      * the device's locale will be used.
      */
     val locale: Locale? = null,
+    /**
+     * Enables contact center integration for this agent. Only has an effect for agents where the
+     * integration is controlled per-conversation (as opposed to being globally enabled or disabled).
+     */
+    val enableContactCenter: Boolean? = false,
 ) : Parcelable
 
 interface ConversationEventListener {
@@ -57,6 +62,19 @@ internal class MainThreadConversationEventListener(private val listener: Convers
 }
 
 data class ConversationTransfer(
+    /**
+     * True if a synchronous transfer was requested, and the user expects the
+     * conversation to continue immediately.
+     */
     val isSynchronous: Boolean,
+    /**
+     * True if the transfer was handled by a Sierra Contact Center integration,
+     * and the conversation with the human agent will continue in the same chat.
+     */
+    val isContactCenter: Boolean,
+    /**
+     * Additional (customer-specific) data, to allow a hand-off from the virtual
+     * agent to the external agent.
+     */
     val data: Map<String, String>
 )

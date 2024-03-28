@@ -185,6 +185,7 @@ class AgentChatFragment : Fragment() {
         for ((name, value) in conversationOptions.secrets) {
             urlBuilder.appendQueryParameter("secret", "$name:$value")
         }
+        urlBuilder.appendQueryParameter("enableContactCenter", conversationOptions.enableContactCenter.toString())
 
         val url = urlBuilder.build().toString()
         // Ensure that there's no chat state from previous runs still present.
@@ -271,6 +272,7 @@ private class ChatWebViewInterface(private val listener: ConversationEventListen
             return
         }
         val isSynchronous = dataJSON.optBoolean("isSynchronous")
+        val isContactCenter = dataJSON.optBoolean("isContactCenter")
         val dataArrayJSON = dataJSON.optJSONArray("data")
         val dataMap = mutableMapOf<String, String>()
         if (dataArrayJSON != null) {
@@ -280,7 +282,7 @@ private class ChatWebViewInterface(private val listener: ConversationEventListen
             }
         }
 
-        val transfer = ConversationTransfer(isSynchronous, dataMap)
+        val transfer = ConversationTransfer(isSynchronous, isContactCenter, dataMap)
         listener?.onConversationTransfer(transfer)
     }
 }
