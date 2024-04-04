@@ -33,6 +33,7 @@ import org.json.JSONObject
 data class AgentChatControllerOptions(
     /** Name for this virtual agent, displayed as the navigation item title. */
     val name: String,
+
     /** Message shown from the agent when starting the conversation. */
     var greetingMessage: String = "How can I help you today?",
     /** Secondary text to display above the agent message at the start of a conversation. */
@@ -41,13 +42,24 @@ data class AgentChatControllerOptions(
     var errorMessage: String = "Oops, an error was encountered! Please try again.",
     /** Placeholder value displayed in the chat input when it is empty. */
     var inputPlaceholder: String = "Message…",
-    /**
+    /** Message shown in place of the chat input when the conversation has ended. */
+    var conversationEndedMessage: String = "Chat Ended",
+
+    /** Message shown when waiting for a human agent to join the conversation. */
+    var agentTransferWaitingMessage: String = "Waiting for agent…",
+    /** Message shown when a human agent has joined the conversation. */
+    var agentJoinedMessage: String = "Agent connected",
+    /** Message shown when a human agent has left the conversation. */
+    var agentLeftMessage: String = "Agent disconnected",
+
+   /**
      * Hide the title bar in the fragment that the controller creates. The containing view is then
      * responsible for showing a title/app bar with the agent name.
      */
     val hideTitleBar: Boolean = false,
     /** Customize the colors and other appearance of the chat UI. */
     val chatStyle: ChatStyle = ChatStyle(),
+
     /** Customization of the Conversation that the controller will create. */
     var conversationOptions: ConversationOptions? = null
 ) : Parcelable {
@@ -168,6 +180,10 @@ class AgentChatFragment : Fragment() {
                 "greetingMessage" to options.greetingMessage,
                 "disclosure" to options.disclosure,
                 "inputPlaceholder" to options.inputPlaceholder,
+                "agentTransferWaitingMessage" to options.agentTransferWaitingMessage,
+                "agentJoinedMessage" to options.agentJoinedMessage,
+                "agentLeftMessage" to options.agentLeftMessage,
+                "conversationEndedMessage" to options.conversationEndedMessage,
                 "chatStyle" to JSONObject(options.chatStyle.toJSON()).toString(),
             )
         ).toString()
