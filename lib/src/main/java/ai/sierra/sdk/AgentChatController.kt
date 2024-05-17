@@ -8,6 +8,8 @@ import android.net.Uri
 import android.net.http.SslError
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.Parcelable
 import android.util.Log
 import android.view.LayoutInflater
@@ -27,6 +29,9 @@ import kotlinx.parcelize.IgnoredOnParcel
 import kotlinx.parcelize.Parcelize
 import org.json.JSONException
 import org.json.JSONObject
+import android.print.PrintAttributes
+import android.print.PrintManager
+
 
 /** Options for configuring an agent chat controller. */
 @Parcelize
@@ -61,7 +66,13 @@ data class AgentChatControllerOptions(
     val chatStyle: ChatStyle = ChatStyle(),
 
     /** Customization of the Conversation that the controller will create. */
-    var conversationOptions: ConversationOptions? = null
+    var conversationOptions: ConversationOptions? = null,
+
+    /** Enable Print Transcript actions to show in Menu Bar and at end of conversation */
+    var canPrintTranscript: Boolean = false,
+    /** Allow the user to manually end a conversation via a UI */
+    var canEndConversation: Boolean = false
+
 ) : Parcelable {
     @IgnoredOnParcel
     var conversationEventListener: ConversationEventListener? = null
@@ -71,6 +82,8 @@ class AgentChatController(
     private val agent: Agent,
     private val options: AgentChatControllerOptions
 ) {
+    private var connectedFragment: AgentChatFragment? = null
+
     fun createFragment(): Fragment {
         return AgentChatFragment().apply {
             arguments = Bundle().apply {
@@ -80,7 +93,15 @@ class AgentChatController(
                 )
             }
             listener = MainThreadConversationEventListener(options.conversationEventListener)
+            controller = this@AgentChatController
         }
+    }
+
+    internal fun connectToFragment(fragment: AgentChatFragment) {
+        this.connectedFragment = fragment
+    }
+    fun printTranscript() {
+        this.connectedFragment?.printTranscript()
     }
 }
 
@@ -93,6 +114,7 @@ private data class AgentChatFragmentArgs(
 class AgentChatFragment : Fragment() {
     private lateinit var webView: WebView
     internal var listener: ConversationEventListener? = null
+    internal var controller: AgentChatController? = null
     /**
      * Flag used to keep track that of whether the web view successfully loaded or not. We only
      * restore state (and avoid reloading the URL) if the last load was successful.
@@ -101,7 +123,7 @@ class AgentChatFragment : Fragment() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // We stash the value of listener in a view model so that when we're recreated we can still
+        // We stash the value of listener and controller in a view model so that when we're recreated we can still
         // get to it and invoke it.
         val viewModel = ViewModelProvider(this)[AgentChatViewModel::class.java]
         if (listener != null) {
@@ -109,6 +131,13 @@ class AgentChatFragment : Fragment() {
         } else {
             listener = viewModel.listener
         }
+
+        if (controller != null) {
+            viewModel.controller = controller
+        } else {
+            controller = viewModel.controller
+        }
+        controller?.connectToFragment(this)
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -135,13 +164,13 @@ class AgentChatFragment : Fragment() {
         }
 
         val agentConfig = args.agentConfig
-        val chatWebViewClient = ChatWebViewClient(this, agentConfig, args.options, listener)
+        val chatWebViewClient = ChatWebViewClient(this, agentConfig, requireContext(), args.options, listener)
         webView.apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.userAgentString = generateUserAgent(requireContext())
             webViewClient = chatWebViewClient
-            addJavascriptInterface(ChatWebViewInterface(listener), "AndroidSDK")
+            addJavascriptInterface(ChatWebViewInterface(requireContext(), listener), "AndroidSDK")
         }
         if (agentConfig.apiHost == AgentAPIHost.LOCAL) {
             WebView.setWebContentsDebuggingEnabled(true)
@@ -202,6 +231,12 @@ class AgentChatFragment : Fragment() {
             urlBuilder.appendQueryParameter("secret", "$name:$value")
         }
         urlBuilder.appendQueryParameter("enableContactCenter", conversationOptions.enableContactCenter.toString())
+        if (options.canPrintTranscript) {
+            urlBuilder.appendQueryParameter("canPrintTranscript", "true")
+        }
+        if (options.canEndConversation) {
+            urlBuilder.appendQueryParameter("canEndConversation", "true")
+        }
 
         val url = urlBuilder.build().toString()
         // Ensure that there's no chat state from previous runs still present.
@@ -219,6 +254,10 @@ class AgentChatFragment : Fragment() {
             outState.putParcelable("args", args)
         }
     }
+
+    fun printTranscript() {
+        webView.evaluateJavascript("sierraAndroid.printTranscript()", null)
+    }
 }
 
 private fun generateUserAgent(context: Context): String {
@@ -233,11 +272,13 @@ private fun generateUserAgent(context: Context): String {
 
 internal class AgentChatViewModel : ViewModel() {
     internal var listener: ConversationEventListener? = null
+    internal var controller: AgentChatController? = null
 }
 
 private class ChatWebViewClient(
     private val fragment: AgentChatFragment,
     private val agentConfig: AgentConfig,
+    private val context: Context,
     private val options: AgentChatControllerOptions,
     private val listener: ConversationEventListener?,
 ) : WebViewClient() {
@@ -278,7 +319,8 @@ private class ChatWebViewClient(
     }
 }
 
-private class ChatWebViewInterface(private val listener: ConversationEventListener?) {
+private class ChatWebViewInterface(private val context: Context,  private val listener: ConversationEventListener?) {
+
     @JavascriptInterface
     fun onTransfer(dataJSONStr: String) {
         val dataJSON = try {
@@ -300,6 +342,45 @@ private class ChatWebViewInterface(private val listener: ConversationEventListen
 
         val transfer = ConversationTransfer(isSynchronous, isContactCenter, dataMap)
         listener?.onConversationTransfer(transfer)
+    }
+
+    private fun createWebPrintJob(webView: WebView) {
+        (this.context.getSystemService(Context.PRINT_SERVICE) as? PrintManager)?.let { printManager ->
+            val jobName = "Chat Transcript"
+            val printAdapter = webView.createPrintDocumentAdapter(jobName)
+
+            printManager.print(
+                jobName,
+                printAdapter,
+                PrintAttributes.Builder().build()
+            )
+        }
+    }
+    @JavascriptInterface
+    fun onPrint(url: String, data: String) {
+        var heldWebView: WebView? = null
+        fun doWebViewPrint() {
+            // Create a WebView object specifically for printing
+            val webView = WebView(this.context)
+            webView.webViewClient = object : WebViewClient() {
+                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) = false
+
+                override fun onPageFinished(view: WebView, url: String) {
+                    createWebPrintJob(view)
+                    heldWebView = null
+                }
+            }
+
+            webView.postUrl(url, data.toByteArray())
+            // Keep a reference to WebView object until you pass the PrintDocumentAdapter
+            // to the PrintManager
+            heldWebView = webView
+        }
+
+        val handler = Handler(Looper.getMainLooper())
+        handler.post {
+            doWebViewPrint()
+        }
     }
 }
 
