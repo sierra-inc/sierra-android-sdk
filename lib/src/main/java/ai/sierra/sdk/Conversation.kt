@@ -39,6 +39,12 @@ interface ConversationEventListener {
      * external agent.
      */
     fun onConversationTransfer(transfer: ConversationTransfer) {}
+
+    /**
+     * Callback invoked when the virtual agent finishes replying to the user.
+     * Not invoked for the greeting message.
+     */
+    fun onAgentMessageEnd() {}
 }
 
 /**
@@ -57,6 +63,12 @@ internal class MainThreadConversationEventListener(private val listener: Convers
     override fun onConversationTransfer(transfer: ConversationTransfer) {
         handler.post {
             listener?.onConversationTransfer(transfer)
+        }
+    }
+
+    override fun onAgentMessageEnd() {
+        handler.post {
+            listener?.onAgentMessageEnd()
         }
     }
 }
