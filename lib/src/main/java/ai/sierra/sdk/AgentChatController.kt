@@ -222,6 +222,14 @@ class AgentChatFragment : Fragment() {
             urlBuilder.appendQueryParameter("hideTitleBar", "true")
         }
         val conversationOptions = options.conversationOptions ?: ConversationOptions()
+        // The custom greeting was initially a UI-only concept and thus specified via AgentChatControllerOptions,
+        // but it now also affects the API, so it's in ConversationOptions. Read it from both places
+        // so that old clients don't need to change anything.
+        var customGreeting = conversationOptions.customGreeting
+        if (customGreeting == null && options.greetingMessage.isNotEmpty()) {
+            customGreeting = options.greetingMessage
+        }
+
         val locale = conversationOptions.locale ?: resources.configuration.locales[0]
         urlBuilder.appendQueryParameter("locale", locale.toLanguageTag())
         for ((name, value) in conversationOptions.variables) {
@@ -229,6 +237,9 @@ class AgentChatFragment : Fragment() {
         }
         for ((name, value) in conversationOptions.secrets) {
             urlBuilder.appendQueryParameter("secret", "$name:$value")
+        }
+        if (customGreeting != null) {
+            urlBuilder.appendQueryParameter("greeting", customGreeting)
         }
         urlBuilder.appendQueryParameter("enableContactCenter", conversationOptions.enableContactCenter.toString())
         if (options.canPrintTranscript) {

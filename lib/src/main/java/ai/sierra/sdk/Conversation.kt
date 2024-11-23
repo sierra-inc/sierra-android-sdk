@@ -21,6 +21,11 @@ data class ConversationOptions(
      */
     val locale: Locale? = null,
     /**
+     * Custom greeting that the agent has used (before it has interacted with
+     * the user).
+     */
+    val customGreeting: String? = null,
+    /**
      * Enables contact center integration for this agent. Only has an effect for agents where the
      * integration is controlled per-conversation (as opposed to being globally enabled or disabled).
      */
