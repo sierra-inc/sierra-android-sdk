@@ -4,6 +4,7 @@ package ai.sierra.sdk
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.net.http.SslError
 import android.os.Build
@@ -327,6 +328,26 @@ private class ChatWebViewClient(
             hadError = true
             listener?.onConversationInitializationError()
         }
+    }
+
+    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+        val url = request?.url ?: return false
+        val baseUri = Uri.parse(agentConfig.url)
+
+        if (request.isForMainFrame && (url.host != baseUri.host || url.scheme != baseUri.scheme)) {
+            Log.i(TAG, "External URL ($url) loaded, will open in the browser")
+
+            val intent = Intent(Intent.ACTION_VIEW, url).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) // Ensures it works in non-Activity contexts
+            }
+
+            val context = view?.context ?: return false
+            Handler(Looper.getMainLooper()).post {
+                context.startActivity(intent)
+            }
+            return true
+        }
+        return false
     }
 }
 
