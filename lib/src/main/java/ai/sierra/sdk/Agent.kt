@@ -16,7 +16,7 @@ data class AgentConfig(
     val token: String,
     var apiHost: AgentAPIHost = AgentAPIHost.PROD
 ): Parcelable {
-    internal val url get() = "https://${apiHost.hostname}/agent/${token}/android"
+    internal val url get() = "https://${apiHost.hostname}/agent/${token}/mobile"
 }
 enum class AgentAPIHost(val hostname: String, val displayName: String) {
     PROD("sierra.chat", "Prod"),

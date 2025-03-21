@@ -222,6 +222,9 @@ class AgentChatFragment : Fragment() {
         if (options.hideTitleBar) {
             urlBuilder.appendQueryParameter("hideTitleBar", "true")
         }
+        // We use session cookies for Android, since sessionStorage is not persisted when
+        // the Fragment that contains the WebView is recreated.
+        urlBuilder.appendQueryParameter("persistenceMode", "cookie")
         val conversationOptions = options.conversationOptions ?: ConversationOptions()
         // The custom greeting was initially a UI-only concept and thus specified via AgentChatControllerOptions,
         // but it now also affects the API, so it's in ConversationOptions. Read it from both places
