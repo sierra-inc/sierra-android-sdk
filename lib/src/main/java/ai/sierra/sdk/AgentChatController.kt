@@ -422,6 +422,11 @@ private class ChatWebViewInterface(private val context: Context,  private val li
     fun onAgentMessageEnd() {
         listener?.onAgentMessageEnd()
     }
+
+    @JavascriptInterface
+    fun onEndChat() {
+        listener?.onConversationEnded()
+    }
 }
 
 private const val TAG = "AgentChatController"

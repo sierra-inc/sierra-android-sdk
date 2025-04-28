@@ -50,6 +50,11 @@ interface ConversationEventListener {
      * Not invoked for the greeting message.
      */
     fun onAgentMessageEnd() {}
+
+    /**
+     * Callback invoked when the conversation ends.
+     */
+    fun onConversationEnded() {}
 }
 
 /**
@@ -74,6 +79,12 @@ internal class MainThreadConversationEventListener(private val listener: Convers
     override fun onAgentMessageEnd() {
         handler.post {
             listener?.onAgentMessageEnd()
+        }
+    }
+
+    override fun onConversationEnded() {
+        handler.post {
+            listener?.onConversationEnded()
         }
     }
 }
