@@ -14,6 +14,7 @@ import kotlinx.parcelize.Parcelize
 @Parcelize
 data class AgentConfig(
     val token: String,
+    val target: String? = null,
     var apiHost: AgentAPIHost = AgentAPIHost.PROD
 ): Parcelable {
     internal val url get() = "https://${apiHost.hostname}/agent/${token}/mobile"

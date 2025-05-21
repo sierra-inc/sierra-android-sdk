@@ -12,11 +12,12 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.Parcelable
+import android.print.PrintAttributes
+import android.print.PrintManager
 import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.SslErrorHandler
 import android.webkit.WebResourceError
@@ -30,8 +31,6 @@ import kotlinx.parcelize.IgnoredOnParcel
 import kotlinx.parcelize.Parcelize
 import org.json.JSONException
 import org.json.JSONObject
-import android.print.PrintAttributes
-import android.print.PrintManager
 
 
 /** Options for configuring an agent chat controller. */
@@ -58,7 +57,7 @@ data class AgentChatControllerOptions(
     /** Message shown when a human agent has left the conversation. */
     var agentLeftMessage: String = "Agent disconnected",
 
-   /**
+    /**
      * Hide the title bar in the fragment that the controller creates. The containing view is then
      * responsible for showing a title/app bar with the agent name.
      */
@@ -101,6 +100,7 @@ class AgentChatController(
     internal fun connectToFragment(fragment: AgentChatFragment) {
         this.connectedFragment = fragment
     }
+
     fun printTranscript() {
         this.connectedFragment?.printTranscript()
     }
@@ -116,11 +116,19 @@ class AgentChatFragment : Fragment() {
     private lateinit var webView: WebView
     internal var listener: ConversationEventListener? = null
     internal var controller: AgentChatController? = null
+
     /**
      * Flag used to keep track that of whether the web view successfully loaded or not. We only
      * restore state (and avoid reloading the URL) if the last load was successful.
      * */
     internal var pageLoaded: Boolean = false
+
+    /**
+     * Storage object for the web view (since sessionStorage is not persisted
+     * when the Fragment that contains the WebView is recreated). Will be saved
+     * and restored from the Bundle.
+     */
+    internal var storage = mutableMapOf<String, String>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -165,13 +173,17 @@ class AgentChatFragment : Fragment() {
         }
 
         val agentConfig = args.agentConfig
-        val chatWebViewClient = ChatWebViewClient(this, agentConfig, requireContext(), args.options, listener)
+        val chatWebViewClient =
+            ChatWebViewClient(this, agentConfig, requireContext(), args.options, listener)
         webView.apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.userAgentString = generateUserAgent(requireContext())
             webViewClient = chatWebViewClient
-            addJavascriptInterface(ChatWebViewInterface(requireContext(), listener), "AndroidSDK")
+            addJavascriptInterface(
+                ChatWebViewInterface(requireContext(), storage, listener),
+                "AndroidSDK"
+            )
         }
         if (agentConfig.apiHost == AgentAPIHost.LOCAL) {
             WebView.setWebContentsDebuggingEnabled(true)
@@ -192,15 +204,28 @@ class AgentChatFragment : Fragment() {
             val savedInstanceArgs = savedInstanceState.getParcelable<AgentChatFragmentArgs>("args")
             if (savedInstanceArgs == args) {
                 pageLoaded = true
+                val savedStorage =
+                    savedInstanceState.getSerializable("storage") as? HashMap<String, String>
+                if (savedStorage != null) {
+                    storage.putAll(savedStorage)
+                } else {
+                    storage.clear()
+                }
                 webView.restoreState(savedInstanceState)
                 return
             }
         }
 
+        // Ensure that there's no chat state from previous runs still present.
+        storage.clear()
+
         val agentConfig = args.agentConfig
         val options = args.options
         // Turn config and options into query parameters that android.tsx expects.
         val urlBuilder = Uri.parse(agentConfig.url).buildUpon()
+        if (agentConfig.target != null && agentConfig.target.isNotEmpty()) {
+            urlBuilder.appendQueryParameter("target", agentConfig.target)
+        }
 
         // Should match the Brand type from bots/useChat.tsx
         val brandJSON = JSONObject(
@@ -222,9 +247,7 @@ class AgentChatFragment : Fragment() {
         if (options.hideTitleBar) {
             urlBuilder.appendQueryParameter("hideTitleBar", "true")
         }
-        // We use session cookies for Android, since sessionStorage is not persisted when
-        // the Fragment that contains the WebView is recreated.
-        urlBuilder.appendQueryParameter("persistenceMode", "cookie")
+        urlBuilder.appendQueryParameter("persistenceMode", "custom")
         val conversationOptions = options.conversationOptions ?: ConversationOptions()
         // The custom greeting was initially a UI-only concept and thus specified via AgentChatControllerOptions,
         // but it now also affects the API, so it's in ConversationOptions. Read it from both places
@@ -245,7 +268,10 @@ class AgentChatFragment : Fragment() {
         if (customGreeting != null) {
             urlBuilder.appendQueryParameter("greeting", customGreeting)
         }
-        urlBuilder.appendQueryParameter("enableContactCenter", conversationOptions.enableContactCenter.toString())
+        urlBuilder.appendQueryParameter(
+            "enableContactCenter",
+            conversationOptions.enableContactCenter.toString()
+        )
         if (options.canPrintTranscript) {
             urlBuilder.appendQueryParameter("canPrintTranscript", "true")
         }
@@ -254,16 +280,14 @@ class AgentChatFragment : Fragment() {
         }
 
         val url = urlBuilder.build().toString()
-        // Ensure that there's no chat state from previous runs still present.
-        CookieManager.getInstance().removeSessionCookies {
-            webView.loadUrl(url)
-        }
+        webView.loadUrl(url)
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         webView.saveState(outState)
         outState.putBoolean("pageLoaded", pageLoaded)
+        outState.putSerializable("storage", HashMap(storage))
         val args = arguments?.getParcelable<AgentChatFragmentArgs>("args")
         if (args != null) {
             outState.putParcelable("args", args)
@@ -354,7 +378,11 @@ private class ChatWebViewClient(
     }
 }
 
-private class ChatWebViewInterface(private val context: Context,  private val listener: ConversationEventListener?) {
+private class ChatWebViewInterface(
+    private val context: Context,
+    private val storage: MutableMap<String, String>,
+    private val listener: ConversationEventListener?
+) {
 
     @JavascriptInterface
     fun onTransfer(dataJSONStr: String) {
@@ -391,6 +419,7 @@ private class ChatWebViewInterface(private val context: Context,  private val li
             )
         }
     }
+
     @JavascriptInterface
     fun onPrint(url: String, data: String) {
         var heldWebView: WebView? = null
@@ -398,7 +427,8 @@ private class ChatWebViewInterface(private val context: Context,  private val li
             // Create a WebView object specifically for printing
             val webView = WebView(this.context)
             webView.webViewClient = object : WebViewClient() {
-                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) = false
+                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) =
+                    false
 
                 override fun onPageFinished(view: WebView, url: String) {
                     createWebPrintJob(view)
@@ -426,6 +456,21 @@ private class ChatWebViewInterface(private val context: Context,  private val li
     @JavascriptInterface
     fun onEndChat() {
         listener?.onConversationEnded()
+    }
+
+    @JavascriptInterface
+    fun storeValue(key: String, value: String) {
+        storage.put(key, value)
+    }
+
+    @JavascriptInterface
+    fun getStoredValue(key: String): String? {
+        return storage.get(key)
+    }
+
+    @JavascriptInterface
+    fun clearStorage() {
+        storage.clear()
     }
 }
 
