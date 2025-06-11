@@ -71,7 +71,9 @@ data class AgentChatControllerOptions(
     /** Enable Print Transcript actions to show in Menu Bar and at end of conversation */
     var canPrintTranscript: Boolean = false,
     /** Allow the user to manually end a conversation via a UI */
-    var canEndConversation: Boolean = false
+    var canEndConversation: Boolean = false,
+    /** Allow the user to start a new conversation via a UI */
+    var canStartNewChat: Boolean = false
 
 ) : Parcelable {
     @IgnoredOnParcel
@@ -277,6 +279,9 @@ class AgentChatFragment : Fragment() {
         }
         if (options.canEndConversation) {
             urlBuilder.appendQueryParameter("canEndConversation", "true")
+        }
+        if (options.canStartNewChat) {
+            urlBuilder.appendQueryParameter("canStartNewChat", "true")
         }
 
         val url = urlBuilder.build().toString()
