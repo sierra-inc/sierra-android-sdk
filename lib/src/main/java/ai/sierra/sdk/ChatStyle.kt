@@ -8,13 +8,44 @@ import androidx.annotation.ColorInt
 
 @Parcelize
 data class ChatStyle (
-    val colors: ChatStyleColors = ChatStyleColors()
+    val colors: ChatStyleColors = ChatStyleColors(),
+    val typography: ChatStyleTypography? = null
 ): Parcelable {
     internal fun toJSON(): Map<String, Any> {
         // Match the ChatStyle type from ui/chat/chat.tsx.
-        return mapOf(
+        val json = mutableMapOf<String, Any>(
             "colors" to colors.toJSON()
         )
+        // Serialize as "type" to match the ChatStyle type from ui/chat/chat.tsx
+        typography?.let {
+            json["type"] = it.toJSON()
+        }
+        return json
+    }
+}
+
+@Parcelize
+data class ChatStyleTypography(
+    /**
+     * The font family, a comma-separated list of font names.
+     * Note: Only built-in system fonts are supported. Custom fonts loaded by the app are not available.
+     */
+    val fontFamily: String? = null,
+
+    /** The font size, in pixels. */
+    val fontSize: Int? = null
+) : Parcelable {
+    internal fun toJSON(): Map<String, Any?> {
+        val typography = mutableMapOf<String, Any?>()
+        fontFamily?.let { typography["fontFamily"] = it }
+        fontSize?.let {
+            typography["fontSize"] = it
+            // Set all responsive font sizes
+            typography["fontSize900"] = it
+            typography["fontSize750"] = it
+            typography["fontSize500"] = it
+        }
+        return typography
     }
 }
 
