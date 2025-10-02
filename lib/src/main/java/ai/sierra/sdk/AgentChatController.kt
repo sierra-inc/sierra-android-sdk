@@ -25,6 +25,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.fragment.app.Fragment
+import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import kotlinx.parcelize.IgnoredOnParcel
@@ -73,7 +74,18 @@ data class AgentChatControllerOptions(
     /** Allow the user to manually end a conversation via a UI */
     var canEndConversation: Boolean = false,
     /** Allow the user to start a new conversation via a UI */
-    var canStartNewChat: Boolean = false
+    var canStartNewChat: Boolean = false,
+
+    /**
+     * Enable automatic state restoration when navigating away and back.
+     * When enabled, state state and conversation history will be preserved
+     * across navigation (e.g. when using NavController).
+     *
+     * This is fully automatic - no additional code required.
+     * Just ensure your ViewModel holding the AgentChatController survives navigation
+     * (e.g. using activityViewModels instead of viewModels).
+     */
+    var enableAutoStateRestoration: Boolean = false
 
 ) : Parcelable {
     @IgnoredOnParcel
@@ -85,6 +97,7 @@ class AgentChatController(
     private val options: AgentChatControllerOptions
 ) {
     private var connectedFragment: AgentChatFragment? = null
+    private var savedFragmentState: Fragment.SavedState? = null
 
     fun createFragment(): Fragment {
         return AgentChatFragment().apply {
@@ -96,6 +109,18 @@ class AgentChatController(
             }
             listener = MainThreadConversationEventListener(options.conversationEventListener)
             controller = this@AgentChatController
+
+            // Consume saved state
+            if (savedFragmentState != null) {
+                setInitialSavedState(savedFragmentState)
+                savedFragmentState = null
+            }
+        }
+    }
+
+    internal fun saveFragmentState(fragmentManager: FragmentManager, fragment: Fragment) {
+        if (options.enableAutoStateRestoration) {
+            savedFragmentState = fragmentManager.saveFragmentInstanceState(fragment)
         }
     }
 
@@ -297,6 +322,11 @@ class AgentChatFragment : Fragment() {
         if (args != null) {
             outState.putParcelable("args", args)
         }
+    }
+
+    override fun onDestroyView() {
+        super.onDestroyView()
+        controller?.saveFragmentState(parentFragmentManager, this)
     }
 
     fun printTranscript() {
