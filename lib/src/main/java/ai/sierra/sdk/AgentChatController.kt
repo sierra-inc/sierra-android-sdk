@@ -40,31 +40,79 @@ data class AgentChatControllerOptions(
     /** Name for this virtual agent, displayed as the navigation item title. */
     val name: String,
 
-    /** Message shown from the agent when starting the conversation. */
-    var greetingMessage: String = "How can I help you today?",
-    /** Secondary text to display above the agent message at the start of a conversation. */
-    var disclosure: String? = null,
-    /** Message shown when an error is encountered during the conversation. */
-    var errorMessage: String = "Oops, an error was encountered! Please try again.",
-    /** Placeholder value displayed in the chat input when it is empty. */
-    var inputPlaceholder: String = "Message…",
-    /** Message shown in place of the chat input when the conversation has ended. */
-    var conversationEndedMessage: String = "Chat Ended",
+    /**
+     * Use chat interface strings configured on the server (greeting, error messages, etc.).
+     * When enabled, server-configured strings take precedence over local string options.
+     */
+    val useConfiguredChatStrings: Boolean = false,
 
-    /** Message shown when waiting for a human agent to join the conversation. */
+    /**
+     * Use styling configured on the server (colors, typography, logo, etc.).
+     * When enabled, server-configured styles take precedence over local chatStyle.
+     */
+    val useConfiguredStyle: Boolean = false,
+
+    /**
+     * Message shown from the agent when starting the conversation.
+     * Overridden by server-configured greeting message if useConfiguredChatStrings is true.
+     */
+    var greetingMessage: String = "How can I help you today?",
+
+    /**
+     * Secondary text to display above the agent message at the start of a conversation.
+     * Overridden by server-configured disclosure if useConfiguredChatStrings is true.
+     */
+    var disclosure: String? = null,
+
+    /**
+     * Message shown when an error is encountered during the conversation.
+     * Overridden by server-configured error message if useConfiguredChatStrings is true.
+     */
+    var errorMessage: String = "Oops, an error was encountered! Please try again.",
+
+    /**
+     * Placeholder value displayed in the chat input when it is empty.
+     * Overridden by server-configured input placeholder if useConfiguredChatStrings is true.
+     * Defaults to "Message…" when this value is empty.
+     */
+    var inputPlaceholder: String = "",
+
+    /**
+     * Message shown in place of the chat input when the conversation has ended.
+     * Overridden by server-configured ended message if useConfiguredChatStrings is true.
+     * Defaults to "Chat ended" when this value is empty.
+     */
+    var conversationEndedMessage: String = "",
+
+    /**
+     * Message shown when waiting for a human agent to join the conversation.
+     * Overridden by server-configured waiting message if useConfiguredChatStrings is true.
+     */
     var agentTransferWaitingMessage: String = "Waiting for agent…",
-    /** Message shown when a human agent has joined the conversation. */
+
+    /**
+     * Message shown when a human agent has joined the conversation.
+     * Overridden by server-configured joined message if useConfiguredChatStrings is true.
+     */
     var agentJoinedMessage: String = "Agent connected",
-    /** Message shown when a human agent has left the conversation. */
+
+    /**
+     * Message shown when a human agent has left the conversation.
+     * Overridden by server-configured left message if useConfiguredChatStrings is true.
+     */
     var agentLeftMessage: String = "Agent disconnected",
+
+    /**
+     * Customize the colors and other appearance of the chat UI.
+     * Overridden by server-configured chat style if useConfiguredStyle is true.
+     */
+    val chatStyle: ChatStyle = ChatStyle(),
 
     /**
      * Hide the title bar in the fragment that the controller creates. The containing view is then
      * responsible for showing a title/app bar with the agent name.
      */
     val hideTitleBar: Boolean = false,
-    /** Customize the colors and other appearance of the chat UI. */
-    val chatStyle: ChatStyle = ChatStyle(),
 
     /** Customization of the Conversation that the controller will create. */
     var conversationOptions: ConversationOptions? = null,
@@ -85,7 +133,20 @@ data class AgentChatControllerOptions(
      * Just ensure your ViewModel holding the AgentChatController survives navigation
      * (e.g. using activityViewModels instead of viewModels).
      */
-    var enableAutoStateRestoration: Boolean = false
+    var enableAutoStateRestoration: Boolean = false,
+
+    /**
+     * Start the chat with messages at the top of the chat frame, allowing the
+     * conversation to expand downward until the frame height has been reached,
+     * at which point older messages scroll out of view.
+     */
+    var startAtTop: Boolean = false,
+
+    /**
+     * Pin the disclosure text to the top of the chat frame so that it is
+     * visible throughout the conversation.
+     */
+    var pinDisclosure: Boolean = false
 
 ) : Parcelable {
     @IgnoredOnParcel
@@ -258,19 +319,27 @@ class AgentChatFragment : Fragment() {
         val brandJSON = JSONObject(
             mapOf(
                 "botName" to options.name,
-                "errorMessage" to options.errorMessage,
                 "greetingMessage" to options.greetingMessage,
-                "disclosure" to options.disclosure,
-                "inputPlaceholder" to options.inputPlaceholder,
+                "errorMessage" to options.errorMessage,
                 "agentTransferWaitingMessage" to options.agentTransferWaitingMessage,
                 "agentJoinedMessage" to options.agentJoinedMessage,
                 "agentLeftMessage" to options.agentLeftMessage,
-                "conversationEndedMessage" to options.conversationEndedMessage,
                 "chatStyle" to JSONObject(options.chatStyle.toJSON()).toString(),
             )
         ).toString()
 
         urlBuilder.appendQueryParameter("brand", brandJSON)
+
+        // Subset of the ChatUiStrings type from chat/ui-strings.ts
+        val chatInterfaceStrings = JSONObject(
+            mapOf(
+                "inputPlaceholder" to options.inputPlaceholder,
+                "disclosure" to (options.disclosure ?: ""),
+                "conversationEndedMessage" to options.conversationEndedMessage,
+            )
+        ).toString()
+        urlBuilder.appendQueryParameter("chatInterfaceStrings", chatInterfaceStrings)
+
         if (options.hideTitleBar) {
             urlBuilder.appendQueryParameter("hideTitleBar", "true")
         }
@@ -307,6 +376,18 @@ class AgentChatFragment : Fragment() {
         }
         if (options.canStartNewChat) {
             urlBuilder.appendQueryParameter("canStartNewChat", "true")
+        }
+        if (options.startAtTop) {
+            urlBuilder.appendQueryParameter("startAtTop", "true")
+        }
+        if (options.pinDisclosure) {
+            urlBuilder.appendQueryParameter("pinDisclosure", "true")
+        }
+        if (options.useConfiguredChatStrings) {
+            urlBuilder.appendQueryParameter("useConfiguredChatStrings", "true")
+        }
+        if (options.useConfiguredStyle) {
+            urlBuilder.appendQueryParameter("useConfiguredStyle", "true")
         }
 
         val url = urlBuilder.build().toString()

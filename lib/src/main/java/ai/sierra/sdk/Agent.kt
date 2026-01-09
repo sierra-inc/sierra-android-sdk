@@ -22,6 +22,7 @@ data class AgentConfig(
 enum class AgentAPIHost(val hostname: String, val displayName: String) {
     PROD("sierra.chat", "Prod"),
     EU("eu.sierra.chat", "EU"),
+    SG("sg.sierra.chat", "SG"),
     STAGING("staging.sierra.chat", "Staging"),
     LOCAL("chat.sierra.codes:8083", "Local")
 }

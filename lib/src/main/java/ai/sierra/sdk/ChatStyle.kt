@@ -6,6 +6,10 @@ import android.os.Parcelable
 import kotlinx.parcelize.Parcelize
 import androidx.annotation.ColorInt
 
+/**
+ * Customize the colors and other appearance of the chat UI. When useConfiguredStyle is true in
+ * AgentChatControllerOptions, these settings are overridden by server-configured settings.
+ */
 @Parcelize
 data class ChatStyle (
     val colors: ChatStyleColors = ChatStyleColors(),
@@ -24,6 +28,10 @@ data class ChatStyle (
     }
 }
 
+/**
+ * Typography settings for chat UI. When useConfiguredStyle is true in AgentChatControllerOptions,
+ * these settings are overridden by server-configured typography.
+ */
 @Parcelize
 data class ChatStyleTypography(
     /**
@@ -49,6 +57,10 @@ data class ChatStyleTypography(
     }
 }
 
+/**
+ * Color settings for chat UI. When useConfiguredStyle is true in AgentChatControllerOptions, these
+ * settings are overridden by server-configured colors.
+ */
 @Parcelize
 data class ChatStyleColors(
     /** The background color for the chat view. */
