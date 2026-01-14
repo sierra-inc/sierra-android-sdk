@@ -269,7 +269,7 @@ class AgentChatFragment : Fragment() {
             settings.userAgentString = generateUserAgent(requireContext())
             webViewClient = chatWebViewClient
             addJavascriptInterface(
-                ChatWebViewInterface(requireContext(), storage, listener),
+                ChatWebViewInterface(requireContext(), storage, listener, this),
                 "AndroidSDK"
             )
         }
@@ -497,8 +497,10 @@ private class ChatWebViewClient(
 private class ChatWebViewInterface(
     private val context: Context,
     private val storage: MutableMap<String, String>,
-    private val listener: ConversationEventListener?
+    private val listener: ConversationEventListener?,
+    private val webView: WebView
 ) {
+    private val handler = Handler(Looper.getMainLooper())
 
     @JavascriptInterface
     fun onTransfer(dataJSONStr: String) {
@@ -587,6 +589,28 @@ private class ChatWebViewInterface(
     @JavascriptInterface
     fun clearStorage() {
         storage.clear()
+    }
+
+    @JavascriptInterface
+    fun onSecretExpiry(secretName: String, callbackId: String) {
+        listener?.onSecretExpiry(secretName) { result ->
+            val jsCode = when (result) {
+                is SecretExpiryResult.Success -> {
+                    val valueJson = if (result.value != null) {
+                        JSONObject.quote(result.value)
+                    } else {
+                        "null"
+                    }
+                    "window.__sierraAndroidResolveCallback(${JSONObject.quote(callbackId)}, $valueJson);"
+                }
+                is SecretExpiryResult.Error -> {
+                    "window.__sierraAndroidResolveCallback(${JSONObject.quote(callbackId)}, null, ${JSONObject.quote(result.message)});"
+                }
+            }
+            handler.post {
+                webView.evaluateJavascript(jsCode, null)
+            }
+        }
     }
 }
 

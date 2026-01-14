@@ -32,6 +32,16 @@ data class ConversationOptions(
     val enableContactCenter: Boolean? = false,
 ) : Parcelable
 
+/**
+ * Result type for secret expiry callback responses.
+ */
+sealed class SecretExpiryResult {
+    /** A new value for the secret. */
+    data class Success(val value: String?) : SecretExpiryResult()
+    /** An error occurred while fetching the secret; the request may be retried. */
+    data class Error(val message: String) : SecretExpiryResult()
+}
+
 interface ConversationEventListener {
     /**
      * Callback invoked on the main thread when the agent chat encounters a critical error and
@@ -55,6 +65,19 @@ interface ConversationEventListener {
      * Callback invoked when the conversation ends.
      */
     fun onConversationEnded() {}
+
+    /**
+     * Callback invoked when a secret needs to be refreshed. The replyHandler should be invoked with one of:
+     * - SecretExpiryResult.Success(newValue) - a new value for the secret
+     * - SecretExpiryResult.Success(null) - if the secret cannot be provided due to a known condition (e.g. the user has signed out)
+     * - SecretExpiryResult.Error(message) - if the secret cannot be fetched right now, but the request should be retried
+     *
+     * @param secretName The name of the secret that needs refreshing
+     * @param replyHandler Function to call with the refresh result
+     */
+    fun onSecretExpiry(secretName: String, replyHandler: (SecretExpiryResult) -> Unit) {
+        replyHandler(SecretExpiryResult.Success(null))
+    }
 }
 
 /**
@@ -85,6 +108,16 @@ internal class MainThreadConversationEventListener(private val listener: Convers
     override fun onConversationEnded() {
         handler.post {
             listener?.onConversationEnded()
+        }
+    }
+
+    override fun onSecretExpiry(secretName: String, replyHandler: (SecretExpiryResult) -> Unit) {
+        handler.post {
+            if (listener != null) {
+                listener.onSecretExpiry(secretName, replyHandler)
+            } else {
+                replyHandler(SecretExpiryResult.Success(null))
+            }
         }
     }
 }
