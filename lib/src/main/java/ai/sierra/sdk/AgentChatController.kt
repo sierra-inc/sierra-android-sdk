@@ -20,10 +20,14 @@ import android.view.View
 import android.view.ViewGroup
 import android.webkit.JavascriptInterface
 import android.webkit.SslErrorHandler
+import android.webkit.ValueCallback
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.ViewModel
@@ -218,8 +222,40 @@ class AgentChatFragment : Fragment() {
      */
     internal var storage = mutableMapOf<String, String>()
 
+    /**
+     * Callback for file chooser results from the WebView.
+     * Used to pass selected file URIs back to the WebView's file input element.
+     */
+    private var filePathCallback: ValueCallback<Array<Uri>>? = null
+
+    /**
+     * Activity result launcher for the file chooser intent.
+     */
+    private lateinit var fileChooserLauncher: ActivityResultLauncher<Intent>
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Register the file chooser launcher before the fragment is started
+        fileChooserLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val uris: Array<Uri>? = if (result.resultCode == android.app.Activity.RESULT_OK) {
+                val data = result.data
+                // Handle multiple file selection (stored in clipData)
+                val clipData = data?.clipData
+                if (clipData != null) {
+                    Array(clipData.itemCount) { i -> clipData.getItemAt(i).uri }
+                } else {
+                    // Handle single file selection (stored in data)
+                    data?.data?.let { arrayOf(it) }
+                }
+            } else {
+                // User cancelled - return null to indicate cancellation
+                null
+            }
+            filePathCallback?.onReceiveValue(uris)
+            filePathCallback = null
+        }
+
         // We stash the value of listener and controller in a view model so that when we're recreated we can still
         // get to it and invoke it.
         val viewModel = ViewModelProvider(this)[AgentChatViewModel::class.java]
@@ -268,6 +304,31 @@ class AgentChatFragment : Fragment() {
             settings.domStorageEnabled = true
             settings.userAgentString = generateUserAgent(requireContext())
             webViewClient = chatWebViewClient
+            webChromeClient = object : WebChromeClient() {
+                override fun onShowFileChooser(
+                    webView: WebView?,
+                    filePathCallback: ValueCallback<Array<Uri>>?,
+                    fileChooserParams: FileChooserParams?
+                ): Boolean {
+                    // Cancel any pending callback
+                    this@AgentChatFragment.filePathCallback?.onReceiveValue(null)
+                    this@AgentChatFragment.filePathCallback = filePathCallback
+
+                    val intent = fileChooserParams?.createIntent() ?: Intent(Intent.ACTION_GET_CONTENT).apply {
+                        type = "*/*"
+                    }
+
+                    try {
+                        fileChooserLauncher.launch(intent)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Cannot launch file chooser", e)
+                        this@AgentChatFragment.filePathCallback?.onReceiveValue(null)
+                        this@AgentChatFragment.filePathCallback = null
+                        return false
+                    }
+                    return true
+                }
+            }
             addJavascriptInterface(
                 ChatWebViewInterface(requireContext(), storage, listener, this),
                 "AndroidSDK"

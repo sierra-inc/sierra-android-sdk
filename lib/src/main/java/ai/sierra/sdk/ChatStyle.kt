@@ -89,6 +89,9 @@ data class ChatStyleColors(
 
     /** The color of the text in chat bubbles for messages from the user. */
     @ColorInt val userBubbleText: Int? = null,
+
+    /** The color of the "Start new chat" button text. */
+    @ColorInt val newChatButton: Int? = null,
 ) : Parcelable {
     internal fun toJSON(): Map<String, String> {
         // Match the ChatStyle.colors type from ui/chat/chat.tsx.
@@ -102,6 +105,7 @@ data class ChatStyleColors(
             "assistantBubbleText" to assistantBubbleText,
             "userBubble" to userBubble,
             "userBubbleText" to userBubbleText,
+            "newChatButton" to newChatButton,
         )
         return colors.filterValues { it != null }
             .mapValues { String.format("#%06X", it.value!! and 0xFFFFFF) }
