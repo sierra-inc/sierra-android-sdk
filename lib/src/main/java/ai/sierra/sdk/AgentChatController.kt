@@ -29,7 +29,6 @@ import android.webkit.WebViewClient
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.fragment.app.Fragment
-import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import kotlinx.parcelize.IgnoredOnParcel
@@ -130,13 +129,15 @@ data class AgentChatControllerOptions(
 
     /**
      * Enable automatic state restoration when navigating away and back.
-     * When enabled, state state and conversation history will be preserved
-     * across navigation (e.g. when using NavController).
      *
-     * This is fully automatic - no additional code required.
-     * Just ensure your ViewModel holding the AgentChatController survives navigation
-     * (e.g. using activityViewModels instead of viewModels).
+     * @deprecated This flag is no longer needed. State restoration is now handled automatically
+     * based on the Agent's persistence setting. Use [PersistenceMode.MEMORY] or [PersistenceMode.DISK]
+     * in [AgentConfig] instead. This flag will be ignored in a future version.
      */
+    @Deprecated(
+        message = "Use Agent's persistence instead. MEMORY mode provides equivalent behavior.",
+        level = DeprecationLevel.WARNING
+    )
     var enableAutoStateRestoration: Boolean = false,
 
     /**
@@ -158,11 +159,10 @@ data class AgentChatControllerOptions(
 }
 
 class AgentChatController(
-    private val agent: Agent,
+    internal val agent: Agent,
     private val options: AgentChatControllerOptions
 ) {
     private var connectedFragment: AgentChatFragment? = null
-    private var savedFragmentState: Fragment.SavedState? = null
 
     fun createFragment(): Fragment {
         return AgentChatFragment().apply {
@@ -174,18 +174,6 @@ class AgentChatController(
             }
             listener = MainThreadConversationEventListener(options.conversationEventListener)
             controller = this@AgentChatController
-
-            // Consume saved state
-            if (savedFragmentState != null) {
-                setInitialSavedState(savedFragmentState)
-                savedFragmentState = null
-            }
-        }
-    }
-
-    internal fun saveFragmentState(fragmentManager: FragmentManager, fragment: Fragment) {
-        if (options.enableAutoStateRestoration) {
-            savedFragmentState = fragmentManager.saveFragmentInstanceState(fragment)
         }
     }
 
@@ -214,13 +202,6 @@ class AgentChatFragment : Fragment() {
      * restore state (and avoid reloading the URL) if the last load was successful.
      * */
     internal var pageLoaded: Boolean = false
-
-    /**
-     * Storage object for the web view (since sessionStorage is not persisted
-     * when the Fragment that contains the WebView is recreated). Will be saved
-     * and restored from the Bundle.
-     */
-    internal var storage = mutableMapOf<String, String>()
 
     /**
      * Callback for file chooser results from the WebView.
@@ -330,7 +311,7 @@ class AgentChatFragment : Fragment() {
                 }
             }
             addJavascriptInterface(
-                ChatWebViewInterface(requireContext(), storage, listener, this),
+                ChatWebViewInterface(requireContext(), controller?.agent, listener, this),
                 "AndroidSDK"
             )
         }
@@ -353,20 +334,17 @@ class AgentChatFragment : Fragment() {
             val savedInstanceArgs = savedInstanceState.getParcelable<AgentChatFragmentArgs>("args")
             if (savedInstanceArgs == args) {
                 pageLoaded = true
-                val savedStorage =
-                    savedInstanceState.getSerializable("storage") as? HashMap<String, String>
+                val savedStorage = savedInstanceState.getSerializable("storage") as? HashMap<String, String>
                 if (savedStorage != null) {
-                    storage.putAll(savedStorage)
-                } else {
-                    storage.clear()
+                    val storage = controller?.agent?.getStorage()
+                    savedStorage.forEach { (key, value) ->
+                        storage?.setItem(key, value)
+                    }
                 }
                 webView.restoreState(savedInstanceState)
                 return
             }
         }
-
-        // Ensure that there's no chat state from previous runs still present.
-        storage.clear()
 
         val agentConfig = args.agentConfig
         val options = args.options
@@ -459,16 +437,14 @@ class AgentChatFragment : Fragment() {
         super.onSaveInstanceState(outState)
         webView.saveState(outState)
         outState.putBoolean("pageLoaded", pageLoaded)
-        outState.putSerializable("storage", HashMap(storage))
         val args = arguments?.getParcelable<AgentChatFragmentArgs>("args")
         if (args != null) {
             outState.putParcelable("args", args)
         }
-    }
-
-    override fun onDestroyView() {
-        super.onDestroyView()
-        controller?.saveFragmentState(parentFragmentManager, this)
+        val storage = controller?.agent?.getStorage()?.getAll()
+        if (storage != null) {
+            outState.putSerializable("storage", HashMap(storage))
+        }
     }
 
     fun printTranscript() {
@@ -557,7 +533,7 @@ private class ChatWebViewClient(
 
 private class ChatWebViewInterface(
     private val context: Context,
-    private val storage: MutableMap<String, String>,
+    private val agent: Agent?,
     private val listener: ConversationEventListener?,
     private val webView: WebView
 ) {
@@ -639,17 +615,17 @@ private class ChatWebViewInterface(
 
     @JavascriptInterface
     fun storeValue(key: String, value: String) {
-        storage.put(key, value)
+        agent?.getStorage()?.setItem(key, value)
     }
 
     @JavascriptInterface
     fun getStoredValue(key: String): String? {
-        return storage.get(key)
+        return agent?.getStorage()?.getItem(key)
     }
 
     @JavascriptInterface
     fun clearStorage() {
-        storage.clear()
+        agent?.getStorage()?.clear()
     }
 
     @JavascriptInterface
