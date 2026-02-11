@@ -56,6 +56,13 @@ interface ConversationEventListener {
     fun onConversationTransfer(transfer: ConversationTransfer) {}
 
     /**
+     * Callback invoked when a conversation starts.
+     *
+     * @param conversationID The unique identifier for the conversation.
+     */
+    fun onConversationStart(conversationID: String) {}
+
+    /**
      * Callback invoked when the virtual agent finishes replying to the user.
      * Not invoked for the greeting message.
      */
@@ -96,6 +103,12 @@ internal class MainThreadConversationEventListener(private val listener: Convers
     override fun onConversationTransfer(transfer: ConversationTransfer) {
         handler.post {
             listener?.onConversationTransfer(transfer)
+        }
+    }
+
+    override fun onConversationStart(conversationID: String) {
+        handler.post {
+            listener?.onConversationStart(conversationID)
         }
     }
 

@@ -5,6 +5,7 @@ package ai.sierra.sdk
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.net.Uri
 import android.net.http.SslError
 import android.os.Build
@@ -184,6 +185,10 @@ class AgentChatController(
     fun printTranscript() {
         this.connectedFragment?.printTranscript()
     }
+
+    fun endConversation() {
+        this.connectedFragment?.endConversation()
+    }
 }
 
 @Parcelize
@@ -202,6 +207,12 @@ class AgentChatFragment : Fragment() {
      * restore state (and avoid reloading the URL) if the last load was successful.
      * */
     internal var pageLoaded: Boolean = false
+
+    /**
+     * Tracks the UI mode (light/dark) when the page was last loaded.
+     * Used to detect dark mode changes and reload with updated colors.
+     */
+    private var lastUiMode: Int = Configuration.UI_MODE_NIGHT_UNDEFINED
 
     /**
      * Callback for file chooser results from the WebView.
@@ -275,6 +286,8 @@ class AgentChatFragment : Fragment() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
+            // Set background color to match chat style to avoid white flash while loading
+            args.options.chatStyle.colors.background?.let { setBackgroundColor(it) }
         }
 
         val agentConfig = args.agentConfig
@@ -330,22 +343,30 @@ class AgentChatFragment : Fragment() {
             return
         }
 
-        if (savedInstanceState != null && savedInstanceState.getBoolean("pageLoaded")) {
+        val currentUiMode = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
+        val savedUiMode = savedInstanceState?.getInt("uiMode", Configuration.UI_MODE_NIGHT_UNDEFINED)
+            ?: Configuration.UI_MODE_NIGHT_UNDEFINED
+        val uiModeChanged = savedUiMode != Configuration.UI_MODE_NIGHT_UNDEFINED && savedUiMode != currentUiMode
+
+        // Restore state if page was loaded AND UI mode hasn't changed.
+        // If UI mode changed (e.g., dark mode toggle), we need to reload with updated colors.
+        if (savedInstanceState != null && savedInstanceState.getBoolean("pageLoaded") && !uiModeChanged) {
             val savedInstanceArgs = savedInstanceState.getParcelable<AgentChatFragmentArgs>("args")
             if (savedInstanceArgs == args) {
                 pageLoaded = true
-                val savedStorage = savedInstanceState.getSerializable("storage") as? HashMap<String, String>
-                if (savedStorage != null) {
-                    val storage = controller?.agent?.getStorage()
-                    savedStorage.forEach { (key, value) ->
-                        storage?.setItem(key, value)
-                    }
-                }
+                lastUiMode = currentUiMode
+                restoreStorage(savedInstanceState)
                 webView.restoreState(savedInstanceState)
                 return
             }
         }
 
+        // If UI mode changed, restore storage but reload with new colors
+        if (uiModeChanged && savedInstanceState != null) {
+            restoreStorage(savedInstanceState)
+        }
+
+        lastUiMode = currentUiMode
         val agentConfig = args.agentConfig
         val options = args.options
         // Turn config and options into query parameters that android.tsx expects.
@@ -433,10 +454,21 @@ class AgentChatFragment : Fragment() {
         webView.loadUrl(url)
     }
 
+    private fun restoreStorage(savedInstanceState: Bundle) {
+        val savedStorage = savedInstanceState.getSerializable("storage") as? HashMap<String, String>
+        if (savedStorage != null) {
+            val storage = controller?.agent?.getStorage()
+            savedStorage.forEach { (key, value) ->
+                storage?.setItem(key, value)
+            }
+        }
+    }
+
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         webView.saveState(outState)
         outState.putBoolean("pageLoaded", pageLoaded)
+        outState.putInt("uiMode", lastUiMode)
         val args = arguments?.getParcelable<AgentChatFragmentArgs>("args")
         if (args != null) {
             outState.putParcelable("args", args)
@@ -449,6 +481,10 @@ class AgentChatFragment : Fragment() {
 
     fun printTranscript() {
         webView.evaluateJavascript("sierraAndroid.printTranscript()", null)
+    }
+
+    fun endConversation() {
+        webView.evaluateJavascript("sierraAndroid.endConversation()", null)
     }
 }
 
@@ -601,6 +637,11 @@ private class ChatWebViewInterface(
         handler.post {
             doWebViewPrint()
         }
+    }
+
+    @JavascriptInterface
+    fun onConversationStart(conversationID: String) {
+        listener?.onConversationStart(conversationID)
     }
 
     @JavascriptInterface
