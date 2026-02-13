@@ -38,6 +38,19 @@ import org.json.JSONException
 import org.json.JSONObject
 
 
+/**
+ * Controls whether the message label (speaker name and timestamp) is shown
+ * above or below chat message bubbles.
+ */
+enum class MessageLabelPlacement(val value: String) {
+    /** Use the server-configured value from the Style panel. */
+    DEFAULT(""),
+    /** Show the message label above chat bubbles. */
+    ABOVE("above"),
+    /** Show the message label below chat bubbles. */
+    BELOW("below"),
+}
+
 /** Options for configuring an agent chat controller. */
 @Parcelize
 data class AgentChatControllerOptions(
@@ -152,7 +165,27 @@ data class AgentChatControllerOptions(
      * Pin the disclosure text to the top of the chat frame so that it is
      * visible throughout the conversation.
      */
-    var pinDisclosure: Boolean = false
+    var pinDisclosure: Boolean = false,
+
+    /**
+     * Whether to show timestamps on chat messages. When null and
+     * useConfiguredStyle is true, the server-configured value is used.
+     */
+    var showTimestamps: Boolean? = null,
+
+    /**
+     * Whether to show speaker labels (e.g. the agent name) on chat messages.
+     * When null and useConfiguredStyle is true, the server-configured value is
+     * used.
+     */
+    var showSpeakerLabels: Boolean? = null,
+
+    /**
+     * Controls whether the message label (speaker name and timestamp) is shown
+     * above or below chat message bubbles. When DEFAULT and useConfiguredStyle
+     * is true, the server-configured value is used.
+     */
+    var messageLabelPlacement: MessageLabelPlacement = MessageLabelPlacement.DEFAULT
 
 ) : Parcelable {
     @IgnoredOnParcel
@@ -376,17 +409,19 @@ class AgentChatFragment : Fragment() {
         }
 
         // Should match the Brand type from bots/useChat.tsx
-        val brandJSON = JSONObject(
-            mapOf(
-                "botName" to options.name,
-                "greetingMessage" to options.greetingMessage,
-                "errorMessage" to options.errorMessage,
-                "agentTransferWaitingMessage" to options.agentTransferWaitingMessage,
-                "agentJoinedMessage" to options.agentJoinedMessage,
-                "agentLeftMessage" to options.agentLeftMessage,
-                "chatStyle" to JSONObject(options.chatStyle.toJSON()).toString(),
-            )
-        ).toString()
+        val brandMap = mutableMapOf<String, Any>(
+            "botName" to options.name,
+            "greetingMessage" to options.greetingMessage,
+            "errorMessage" to options.errorMessage,
+            "agentTransferWaitingMessage" to options.agentTransferWaitingMessage,
+            "agentJoinedMessage" to options.agentJoinedMessage,
+            "agentLeftMessage" to options.agentLeftMessage,
+            "chatStyle" to JSONObject(options.chatStyle.toJSON()).toString(),
+            "messageLabelPlacement" to options.messageLabelPlacement.value,
+        )
+        options.showTimestamps?.let { brandMap["showTimestamps"] = it }
+        options.showSpeakerLabels?.let { brandMap["showBotName"] = it }
+        val brandJSON = JSONObject(brandMap as Map<*, *>).toString()
 
         urlBuilder.appendQueryParameter("brand", brandJSON)
 
