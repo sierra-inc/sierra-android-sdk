@@ -317,9 +317,21 @@ data class AgentChatControllerOptions(
     }
 }
 
+/**
+ * Creates a chat controller backed by a WebView.
+ *
+ * @param agent The Sierra agent to chat with.
+ * @param options Long-lived configuration that is safe to reuse across presentations.
+ * @param conversationState Optional opaque state token returned by the public Sierra API
+ *   identifying a specific conversation to resume. Supply this only on the controller
+ *   instance that should resume that conversation; do not retain it on long-lived
+ *   configuration, since reusing the same value after the user starts a new
+ *   conversation will cause that new conversation to be replaced by the original one.
+ */
 class AgentChatController(
     internal val agent: Agent,
-    private val options: AgentChatControllerOptions
+    private val options: AgentChatControllerOptions,
+    private val conversationState: String? = null
 ) {
     private var connectedFragment: AgentChatFragment? = null
 
@@ -328,7 +340,11 @@ class AgentChatController(
             arguments = Bundle().apply {
                 putParcelable(
                     "args",
-                    AgentChatFragmentArgs(agentConfig = agent.config, options = options)
+                    AgentChatFragmentArgs(
+                        agentConfig = agent.config,
+                        options = options,
+                        conversationState = conversationState
+                    )
                 )
             }
             listener = MainThreadConversationEventListener(options.conversationEventListener)
@@ -364,7 +380,8 @@ class AgentChatController(
 @Parcelize
 private data class AgentChatFragmentArgs(
     val agentConfig: AgentConfig,
-    val options: AgentChatControllerOptions
+    val options: AgentChatControllerOptions,
+    val conversationState: String? = null
 ) : Parcelable
 
 class AgentChatFragment : Fragment() {
@@ -722,6 +739,9 @@ class AgentChatFragment : Fragment() {
         if (!options.userIdentityToken.isNullOrEmpty()) {
             urlBuilder.appendQueryParameter("userIdentityToken", options.userIdentityToken)
         }
+        if (!args.conversationState.isNullOrEmpty()) {
+            urlBuilder.appendQueryParameter("state", args.conversationState)
+        }
         if (options.enableConversationList) {
             urlBuilder.appendQueryParameter("enableConversationList", "true")
         }
@@ -868,7 +888,12 @@ private class ChatWebViewClient(
         val baseUri = Uri.parse(agentConfig.url)
 
         if (request.isForMainFrame && (url.host != baseUri.host || url.scheme != baseUri.scheme)) {
-            Log.i(TAG, "External URL ($url) loaded, will open in the browser")
+            if (listener?.onLinkClick(url) == true) {
+                Log.i(TAG, "External URL (${url.logSafeDescription()}) handled by host app")
+                return true
+            }
+
+            Log.i(TAG, "External URL (${url.logSafeDescription()}) loaded, will open in the browser")
 
             val intent = Intent(Intent.ACTION_VIEW, url).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) // Ensures it works in non-Activity contexts

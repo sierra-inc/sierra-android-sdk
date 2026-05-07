@@ -51,6 +51,7 @@ private fun svpClientEventAttachments(json: JSONObject): List<Map<String, Any?>>
 internal interface MobileRendererDelegate {
     fun onSVPClientEvent(text: String, attachments: List<Map<String, Any?>>)
     fun onMobileRendererError(error: Throwable)
+    fun onLinkClick(url: Uri)
 }
 
 internal class MobileRendererView(
@@ -109,6 +110,7 @@ internal class MobileRendererView(
         }
         val bgColor = options.voiceStyle.rendererBackgroundColor ?: options.voiceStyle.backgroundColor
         builder.appendQueryParameter("backgroundColor", bgColor.toHexColor())
+        builder.appendQueryParameter("supportsLinkClick", "true")
         webView.loadUrl(builder.build().toString())
     }
 
@@ -170,6 +172,19 @@ internal class MobileRendererView(
         fun onError(reason: String?) {
             val message = reason ?: "unknown-renderer-error"
             delegate.onMobileRendererError(IllegalStateException(message))
+        }
+
+        @JavascriptInterface
+        fun onLinkClick(url: String?) {
+            val raw = url ?: return
+            val parsed = try {
+                Uri.parse(raw)
+            } catch (_: Throwable) {
+                return
+            }
+            Handler(Looper.getMainLooper()).post {
+                delegate.onLinkClick(parsed)
+            }
         }
     }
 }

@@ -6,11 +6,13 @@ package ai.sierra.sdk
 import ai.sierra.sdk.voice.R
 import android.Manifest
 import android.animation.ObjectAnimator
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.content.res.Resources
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -36,11 +38,35 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
 
+public data class AgentAttachment(
+    val type: String,
+    val data: Map<String, Any?>
+)
+
 public interface VoiceCallbacks {
     public fun onVoiceEnded()
     public fun onVoiceError(error: Throwable)
+    public fun onAgentAttachment(attachments: List<AgentAttachment>) {}
     public fun onSessionInfoReceived(conversationID: String, encryptionKey: String?) {}
     public fun onResumeTokenReceived(token: String) {}
+}
+
+private fun Map<String, Any?>.toAgentAttachment(): AgentAttachment? {
+    val type = this["type"] as? String ?: return null
+    val data = (this["data"] as? Map<*, *>)?.toStringKeyedMap() ?: return null
+    return AgentAttachment(type = type, data = data)
+}
+
+private fun List<Map<String, Any?>>.toAgentAttachments(): List<AgentAttachment> =
+    mapNotNull { it.toAgentAttachment() }
+
+private fun Map<*, *>.toStringKeyedMap(): Map<String, Any?>? {
+    val map = mutableMapOf<String, Any?>()
+    for ((key, value) in this) {
+        val stringKey = key as? String ?: return null
+        map[stringKey] = value
+    }
+    return map
 }
 
 @Parcelize
@@ -661,7 +687,13 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         }
         lastRenderableAttachmentsSignature = signature
 
+        val agentAttachments = attachments.toAgentAttachments()
+
         Handler(Looper.getMainLooper()).post {
+            if (agentAttachments.isNotEmpty()) {
+                voiceCallbacks?.onAgentAttachment(agentAttachments)
+            }
+
             if (rendererFailed) {
                 return@post
             }
@@ -718,6 +750,23 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         rendererFailed = true
         rendererView?.visibility = View.GONE
         placeholderContainer.visibility = View.VISIBLE
+    }
+
+    override fun onLinkClick(url: Uri) {
+        if (controller?.conversationEventListener?.onLinkClick(url) == true) {
+            Log.i(VOICE_TAG, "External URL (${url.logSafeDescription()}) handled by host app")
+            return
+        }
+
+        Log.i(VOICE_TAG, "External URL (${url.logSafeDescription()}) loaded, will open in the browser")
+        val intent = Intent(Intent.ACTION_VIEW, url).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        try {
+            requireContext().startActivity(intent)
+        } catch (e: Throwable) {
+            Log.w(VOICE_TAG, "Failed to start activity for URL (${url.logSafeDescription()})", e)
+        }
     }
 
     private fun canonicalizeForSignature(value: Any?): String {
@@ -783,4 +832,3 @@ private fun Fragment.resolvePlaceholderTextColor(): Int {
 
 private val Int.dp: Int
     get() = (this * Resources.getSystem().displayMetrics.density).toInt()
-

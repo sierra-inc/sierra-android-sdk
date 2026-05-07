@@ -38,6 +38,12 @@ public class AgentVoiceChatCoordinator(
 
         /** Called when the voice session encounters an error. */
         public fun onVoiceError(coord: AgentVoiceChatCoordinator, error: Throwable) {}
+
+        /** Called when the voice session receives agent-produced attachments. */
+        public fun onAgentAttachment(
+            coord: AgentVoiceChatCoordinator,
+            attachments: List<AgentAttachment>
+        ) {}
     }
 
     public var delegate: Delegate? = null
@@ -79,6 +85,7 @@ public class AgentVoiceChatCoordinator(
         }
 
         return AgentVoiceController(agent, voiceOptions).also { controller ->
+            controller.conversationEventListener = options.chatOptions.conversationEventListener
             controller.voiceCallbacks = this
         }
     }
@@ -113,6 +120,10 @@ public class AgentVoiceChatCoordinator(
 
     override fun onVoiceError(error: Throwable) {
         delegate?.onVoiceError(this, error)
+    }
+
+    override fun onAgentAttachment(attachments: List<AgentAttachment>) {
+        delegate?.onAgentAttachment(this, attachments)
     }
 
     override fun onSessionInfoReceived(conversationID: String, encryptionKey: String?) {

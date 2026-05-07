@@ -2,6 +2,7 @@
 
 package ai.sierra.sdk
 
+import android.net.Uri
 import android.net.http.SslError
 import android.os.Handler
 import android.os.Looper
@@ -128,6 +129,13 @@ interface ConversationEventListener {
     fun onReceivedSslError(view: WebView?, sslErrorHandler: SslErrorHandler?, error: SslError?) {
         sslErrorHandler?.cancel()
     }
+
+    /**
+     * Callback invoked on the main thread when the user taps a link in the chat or in a voice
+     * attachment. Return `true` if the host app handled the link in-app, or `false` to let the
+     * SDK fall back to `Intent.ACTION_VIEW`.
+     */
+    fun onLinkClick(url: Uri): Boolean = false
 }
 
 /**
@@ -215,6 +223,13 @@ internal class MainThreadConversationEventListener(private val listener: Convers
         this.handler.post {
             listener.onReceivedSslError(view, sslErrorHandler, error)
         }
+    }
+
+    override fun onLinkClick(url: Uri): Boolean {
+        check(Looper.myLooper() == Looper.getMainLooper()) {
+            "onLinkClick must be called on the main thread"
+        }
+        return listener?.onLinkClick(url) ?: false
     }
 }
 

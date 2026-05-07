@@ -92,6 +92,13 @@ data class ChatStyleColors(
 
     /** The color of the "Start new chat" button text. */
     @ColorInt val newChatButton: Int? = null,
+
+    /**
+     * The color of the file upload (attachment) button icon in the chat input. When null,
+     * falls back to `userBubble`. Override this when `userBubble` does not contrast well with
+     * `background` in light or dark mode.
+     */
+    @ColorInt val uploadButtonIcon: Int? = null,
 ) : Parcelable {
     internal fun toJSON(): Map<String, String> {
         // Match the web embed's ChatStyle.colors shape.
@@ -106,6 +113,7 @@ data class ChatStyleColors(
             "userBubble" to userBubble,
             "userBubbleText" to userBubbleText,
             "newChatButton" to newChatButton,
+            "uploadButtonIcon" to uploadButtonIcon,
         )
         return colors.filterValues { it != null }
             .mapValues { String.format("#%06X", it.value!! and 0xFFFFFF) }
