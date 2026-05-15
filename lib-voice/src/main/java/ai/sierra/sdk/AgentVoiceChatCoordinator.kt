@@ -20,7 +20,23 @@ public class AgentVoiceChatCoordinator(
     public data class Options(
         val voiceOptions: AgentVoiceControllerOptions,
         val chatOptions: AgentChatControllerOptions,
+        var agentEventListener: AgentEventListener? = null,
+        /**
+         * When true, the voice view includes a navigation-bar button that lets the user switch
+         * from voice to chat without ending the conversation. On tap, the SVP session is closed
+         * with the `continue_in_chat` close reason and the chat view is presented with the
+         * transcript preserved. End and dismissal still terminate the conversation as usual.
+         */
         val canSwitchToChat: Boolean = true,
+        /**
+         * When true (and [canSwitchToChat] is also true), the voice session's natural end --
+         * whether the user taps the End button or the agent ends the conversation server-side --
+         * is treated like a switch-to-chat: the coordinator fires
+         * [Delegate.coordinatorDidRequestShowingChat] instead of [Delegate.coordinatorVoiceDidEnd],
+         * and the chat view opens with the voice transcript seeded. No-op if [canSwitchToChat] is
+         * false.
+         */
+        val autoShowChatOnEnd: Boolean = true,
     )
 
     public interface Delegate {
@@ -56,6 +72,7 @@ public class AgentVoiceChatCoordinator(
     public var voiceResumeToken: String? = null
         private set
 
+    public var agentEventListener: AgentEventListener? = options.agentEventListener
     // One-shot handoff latch: set by the voice switch action and consumed by the next
     // makeChatController() call so only the first chat presentation after handoff seeds storage.
     private val pendingContinueInChat = AtomicBoolean(false)
@@ -66,6 +83,9 @@ public class AgentVoiceChatCoordinator(
 
     public fun makeVoiceController(): AgentVoiceController {
         val voiceOptions = options.voiceOptions.copy()
+        // data class copy() only carries primary-constructor params; preserve and re-set the
+        // @IgnoredOnParcel body properties below.
+        voiceOptions.voiceOkHttpClientCustomizer = options.voiceOptions.voiceOkHttpClientCustomizer
         val shouldResumeConversation =
             voiceConversationID != null ||
                 (voiceOptions.resumeConversation && voiceOptions.voiceConversationID != null)
@@ -82,6 +102,7 @@ public class AgentVoiceChatCoordinator(
         if (options.canSwitchToChat) {
             voiceOptions.canSwitchToChat = true
             voiceOptions.onSwitchToChat = { handleSwitchToChat() }
+            voiceOptions.endRoutesToChat = options.autoShowChatOnEnd
         }
 
         return AgentVoiceController(agent, voiceOptions).also { controller ->
@@ -99,7 +120,10 @@ public class AgentVoiceChatCoordinator(
         }
 
         val chatOptions = options.chatOptions.copy()
+        // data class copy() only carries primary-constructor params; preserve and re-set the
+        // @IgnoredOnParcel body properties below.
         chatOptions.conversationEventListener = options.chatOptions.conversationEventListener
+            ?: agentEventListener?.let { ChatEventListenerAdapter(it) }
         chatOptions.onConversationEndedInternal = { resetConversation() }
         return AgentChatController(agent, chatOptions)
     }
@@ -114,6 +138,10 @@ public class AgentVoiceChatCoordinator(
     }
 
     override fun onVoiceEnded() {
+        if (options.canSwitchToChat && options.autoShowChatOnEnd) {
+            handleSwitchToChat()
+            return
+        }
         resetConversation()
         delegate?.coordinatorVoiceDidEnd(this)
     }
@@ -124,6 +152,19 @@ public class AgentVoiceChatCoordinator(
 
     override fun onAgentAttachment(attachments: List<AgentAttachment>) {
         delegate?.onAgentAttachment(this, attachments)
+    }
+
+    override fun onSecretExpiry(secretName: String, replyHandler: (SecretExpiryResult) -> Unit) {
+        val listener = agentEventListener
+        if (listener == null) {
+            replyHandler(SecretExpiryResult.Success(null))
+            return
+        }
+        listener.onSecretExpiry(secretName, replyHandler)
+    }
+
+    override fun onLinkClick(url: android.net.Uri): Boolean {
+        return agentEventListener?.onLinkClick(url) ?: false
     }
 
     override fun onSessionInfoReceived(conversationID: String, encryptionKey: String?) {
@@ -182,5 +223,17 @@ public class AgentVoiceChatCoordinator(
         } catch (_: JSONException) {
             null
         }
+    }
+}
+
+private class ChatEventListenerAdapter(
+    private val listener: AgentEventListener
+) : ConversationEventListener {
+    override fun onSecretExpiry(secretName: String, replyHandler: (SecretExpiryResult) -> Unit) {
+        listener.onSecretExpiry(secretName, replyHandler)
+    }
+
+    override fun onLinkClick(url: android.net.Uri): Boolean {
+        return listener.onLinkClick(url)
     }
 }

@@ -80,6 +80,7 @@ internal class MobileRendererView(
         webView.settings.javaScriptEnabled = true
         webView.settings.domStorageEnabled = true
         webView.settings.userAgentString = generateVoiceUserAgent(context, isWebView = true)
+        webView.settings.applySierraSecurityDefaults()
         webView.webViewClient = MobileRendererWebViewClient(agentConfig, conversationEventListener, delegate)
         webView.webChromeClient = object : WebChromeClient() {
             override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
@@ -120,6 +121,16 @@ internal class MobileRendererView(
             evaluatePushAttachments(json)
         } else {
             pendingBatches.add(json)
+        }
+    }
+
+    fun clearConversation() {
+        pendingBatches.clear()
+        if (isReady) {
+            webView.evaluateJavascript(
+                "if (window.sierraMobile?.clearConversation) { window.sierraMobile.clearConversation(); }",
+                null
+            )
         }
     }
 
@@ -195,16 +206,18 @@ private class MobileRendererWebViewClient(
     private val delegate: MobileRendererDelegate
 ) : WebViewClient() {
     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-        Log.d(VOICE_TAG, "MobileRenderer: loading $url")
+        val safeUrl = url?.let { Uri.parse(it).logSafeDescription() } ?: "<null>"
+        Log.d(VOICE_TAG, "MobileRenderer: loading $safeUrl")
     }
 
     @SuppressLint("WebViewClientOnReceivedSslError")
     override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: SslError?) {
+        val safeUrl = error?.url?.let { Uri.parse(it).logSafeDescription() } ?: "<null>"
         if (conversationEventListener != null) {
-            Log.w(VOICE_TAG, "Delegating renderer SSL error handling for URL ${error?.url}")
+            Log.w(VOICE_TAG, "Delegating renderer SSL error handling for URL $safeUrl")
             conversationEventListener.onReceivedSslError(view, handler, error)
         } else {
-            Log.w(VOICE_TAG, "Cancelling renderer SSL error for URL ${error?.url}")
+            Log.w(VOICE_TAG, "Cancelling renderer SSL error for URL $safeUrl")
             handler?.cancel()
         }
     }

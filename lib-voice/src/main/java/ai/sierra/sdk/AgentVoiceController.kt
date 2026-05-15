@@ -18,6 +18,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.Parcelable
 import android.util.Log
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.MenuItem
 import android.view.View
@@ -27,23 +28,30 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
+import androidx.annotation.DrawableRes
+import androidx.annotation.FontRes
 import androidx.appcompat.widget.Toolbar
 import androidx.core.content.ContextCompat
+import androidx.core.content.res.ResourcesCompat
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import kotlinx.parcelize.IgnoredOnParcel
 import kotlinx.parcelize.Parcelize
+import okhttp3.OkHttpClient
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
+
+// AgentEvent custom attachment payload consumed by the native voice layer to reset rendered cards.
+private const val CLEAR_CONVERSATION_RENDERER_TYPE = "clear-conversation-renderer"
 
 public data class AgentAttachment(
     val type: String,
     val data: Map<String, Any?>
 )
 
-public interface VoiceCallbacks {
+public interface VoiceCallbacks : AgentEventListener {
     public fun onVoiceEnded()
     public fun onVoiceError(error: Throwable)
     public fun onAgentAttachment(attachments: List<AgentAttachment>) {}
@@ -60,6 +68,14 @@ private fun Map<String, Any?>.toAgentAttachment(): AgentAttachment? {
 private fun List<Map<String, Any?>>.toAgentAttachments(): List<AgentAttachment> =
     mapNotNull { it.toAgentAttachment() }
 
+private fun isClearConversationAttachment(attachment: Map<String, Any?>): Boolean {
+    if (attachment["type"] != "custom") {
+        return false
+    }
+    val data = (attachment["data"] as? Map<*, *>)?.toStringKeyedMap() ?: return false
+    return data["type"] == CLEAR_CONVERSATION_RENDERER_TYPE
+}
+
 private fun Map<*, *>.toStringKeyedMap(): Map<String, Any?>? {
     val map = mutableMapOf<String, Any?>()
     for ((key, value) in this) {
@@ -75,13 +91,22 @@ public data class AgentVoiceStyle(
     val titleBarColor: Int = Color.WHITE,
     val titleBarTextColor: Int = Color.BLACK,
     val controlsColor: Int = Color.parseColor("#12304C"),
-    val rendererBackgroundColor: Int? = null
+    val rendererBackgroundColor: Int? = null,
+    val muteButtonColor: Int? = null,
+    val endConversationButtonColor: Int? = null,
+    val conversationDisclosureTextColor: Int = Color.GRAY,
+    /** Optional font resource override for the disclosure shown below the controls. */
+    @FontRes val conversationDisclosureFontResId: Int? = null,
+    /** Font size for the disclosure shown below the controls, in sp. */
+    val conversationDisclosureTextSizeSp: Float = 12f
 ) : Parcelable
 
 @Parcelize
 public data class AgentVoiceControllerOptions(
     val name: String,
     var titleBarMessage: String? = null,
+    /** Hide the SDK toolbar. The containing view is then responsible for any title/app bar UI. */
+    var hideTitleBar: Boolean = false,
     var voiceStyle: AgentVoiceStyle = AgentVoiceStyle(),
     var voicePlaceholderText: String = "How can I help you today?",
     var locale: String = Locale.getDefault().toLanguageTag(),
@@ -89,11 +114,21 @@ public data class AgentVoiceControllerOptions(
     var resumeConversation: Boolean = false,
     var voiceAgentParameters: HashMap<String, String>? = null,
     var disableInterruptions: Boolean = false,
-    var allowInsecureLocalConnections: Boolean = false,
     /** Included in the SVP `open` submessage. Defaults to `true`. */
     var enableText: Boolean = true,
     /** Included in the SVP `open` submessage. Defaults to `true`. */
-    var forwardAgentAttachments: Boolean = true
+    var forwardAgentAttachments: Boolean = true,
+    /** Optional disclosure text shown below the native mute/end controls. */
+    var disclosureText: String? = null,
+    /** Optional vector/SVG drawable resource override for the mute button. */
+    @DrawableRes
+    var muteIconResId: Int? = null,
+    /** Optional vector/SVG drawable resource override for the muted state. */
+    @DrawableRes
+    var mutedIconResId: Int? = null,
+    /** Optional vector/SVG drawable resource override for the end conversation button. */
+    @DrawableRes
+    var endConversationIconResId: Int? = null
 ) : Parcelable {
     @Deprecated("Use voiceAgentParameters instead.")
     @IgnoredOnParcel
@@ -102,6 +137,21 @@ public data class AgentVoiceControllerOptions(
         set(value) {
             voiceAgentParameters = value
         }
+
+    /**
+     * Optional customizer applied to the OkHttpClient builder that backs the voice WebSocket
+     * transport.
+     *
+     * The default behavior leaves OkHttp's secure transport defaults in place and should be
+     * sufficient for all normal and production uses of the SDK.
+     *
+     * Overrides and any non-default behavior should be considered only in controlled testing
+     * situations, such as local development against a server with a self-signed certificate.
+     * Production applications should continue using the default behavior.
+     */
+    @IgnoredOnParcel
+    @SierraInternalApi
+    public var voiceOkHttpClientCustomizer: ((OkHttpClient.Builder) -> Unit)? = null
 
     // SDK-internal options
     //
@@ -121,6 +171,14 @@ public data class AgentVoiceControllerOptions(
 
     @IgnoredOnParcel
     internal var onSwitchToChat: (() -> Unit)? = null
+
+    /**
+     * When true, tapping End closes the SVP session with the `continue_in_chat` close reason and
+     * invokes `onSwitchToChat` instead of `onVoiceEnded`. Set by `AgentVoiceChatCoordinator` when
+     * `autoShowChatOnEnd` is enabled.
+     */
+    @IgnoredOnParcel
+    internal var endRoutesToChat: Boolean = false
 }
 
 public class AgentVoiceController(
@@ -157,6 +215,7 @@ public class AgentVoiceController(
                     ?: Color.parseColor("#12304C"),
                 rendererBackgroundColor = options.chatStyle.colors.background
             ),
+            hideTitleBar = options.hideTitleBar,
             voicePlaceholderText = options.greetingMessage,
             voiceAgentParameters = options.conversationOptions?.secrets?.let { HashMap(it) }
         )
@@ -209,12 +268,14 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
     private lateinit var errorBanner: TextView
     private lateinit var muteButton: ImageView
     private lateinit var endButton: ImageView
+    private lateinit var disclosureLabel: TextView
     private var switchToChatMenuItem: MenuItem? = null
     private val controlButtonSizeDp = 64
     private val controlIconMaxSizeDp = 32
     private val controlButtonSpacingDp = 28
     private val controlsTopPaddingDp = 16
     private val controlsBottomPaddingDp = 18
+    private val controlsBottomPaddingWithDisclosureDp = 4
     private val placeholderWaveformBoxSizeDp = 80
     private val placeholderWaveformIconSizeDp = 40
 
@@ -222,14 +283,19 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
     private var pulseAnimatorY: ObjectAnimator? = null
     private var rendererView: MobileRendererView? = null
     private var voiceSession: VoiceSessionManager? = null
+    private var secretRefreshOrchestrator: SecretRefreshOrchestrator? = null
     private var hasShownFirstAttachment = false
     private var hasReceivedInitialGreeting = false
+    private var hasReceivedInitialAudioMessage = false
     private var hasShutdownVoiceSession = false
     private var voiceExitState = VoiceExitState.NONE
     private var rendererFailed = false
     private var lastRenderableAttachmentsSignature: String? = null
     private var isMuted = false
     private var isDisableInterruptions = false
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var initialGreetingFallbackRunnable: Runnable? = null
+    private val initialGreetingFallbackDelayMs = 2_000L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -263,7 +329,9 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
             setBackgroundColor(options.voiceStyle.backgroundColor)
         }
 
-        rootLayout.addView(createToolbar())
+        if (!shouldHideTitleBar()) {
+            rootLayout.addView(createToolbar())
+        }
         rootLayout.addView(createErrorBanner())
         rootLayout.addView(createContentContainer(), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -296,6 +364,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
     }
 
     override fun onDestroyView() {
+        cancelInitialGreetingFallback()
         shutdownVoiceSessionIfNeeded()
         pulseAnimatorX?.cancel()
         pulseAnimatorX = null
@@ -328,7 +397,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         hasShutdownVoiceSession = false
         voiceExitState = VoiceExitState.NONE
         VoiceSessionService.start(requireContext())
-        voiceSession = VoiceSessionManager(
+        val session = VoiceSessionManager(
             config = agentConfig,
             conversationId = options.voiceConversationID,
             resumeConversation = options.resumeConversation,
@@ -337,11 +406,14 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
             disableInterruptions = isDisableInterruptions,
             localeTag = options.locale,
             agentParameters = agentParameters,
-            allowInsecureLocalConnections = options.allowInsecureLocalConnections,
+            customizeOkHttpClient = options.voiceOkHttpClientCustomizer,
             enableText = options.enableText,
             forwardAgentAttachments = options.forwardAgentAttachments,
             delegate = this
-        ).also { it.connect() }
+        )
+        voiceSession = session
+        secretRefreshOrchestrator = SecretRefreshOrchestrator(session, voiceCallbacks)
+        session.connect()
         updateUIForState(VoiceSessionManager.State.CONNECTING)
     }
 
@@ -350,6 +422,8 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
             return
         }
         hasShutdownVoiceSession = true
+        secretRefreshOrchestrator?.cancel()
+        secretRefreshOrchestrator = null
         voiceSession?.disconnect(closeReason = closeReason)
         voiceSession = null
         if (isAdded) {
@@ -373,6 +447,14 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         options.onSwitchToChat?.invoke()
     }
 
+    private fun handleEndTapped() {
+        if (options.endRoutesToChat) {
+            switchToChatTapped()
+        } else {
+            endConversation()
+        }
+    }
+
     private fun createToolbar(): Toolbar {
         return Toolbar(requireContext()).apply {
             setBackgroundColor(options.voiceStyle.titleBarColor)
@@ -380,7 +462,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
             title = options.titleBarMessage?.takeIf { it.isNotBlank() } ?: options.name
             setNavigationIcon(androidx.appcompat.R.drawable.abc_ic_ab_back_material)
             navigationIcon?.setTint(options.voiceStyle.titleBarTextColor)
-            setNavigationOnClickListener { endConversation() }
+            setNavigationOnClickListener { handleEndTapped() }
             if (options.canSwitchToChat) {
                 switchToChatMenuItem = menu.add(options.switchToChatLabel).apply {
                     setIcon(R.drawable.sierra_ic_chat_bubble_24)
@@ -394,6 +476,8 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
             }
         }
     }
+
+    private fun shouldHideTitleBar(): Boolean = options.hideTitleBar && !options.canSwitchToChat
 
     private fun createErrorBanner(): TextView {
         errorBanner = TextView(requireContext()).apply {
@@ -459,37 +543,69 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
     }
 
     private fun createBottomControls(): View {
+        val hasDisclosure = !options.disclosureText.isNullOrBlank()
         val container = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            val bottomPaddingDp = if (hasDisclosure) controlsBottomPaddingWithDisclosureDp else controlsBottomPaddingDp
+            setPadding(0, controlsTopPaddingDp.dp, 0, bottomPaddingDp.dp)
+        }
+        val buttonsContainer = LinearLayout(requireContext()).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(0, controlsTopPaddingDp.dp, 0, controlsBottomPaddingDp.dp)
         }
-        muteButton = createCircleButton(R.drawable.sierra_ic_mic_24).apply {
+        muteButton = createCircleButton(
+            iconRes = options.muteIconResId ?: R.drawable.sierra_ic_mic_24,
+            backgroundColor = options.voiceStyle.muteButtonColor ?: resolvedControlsColor()
+        ).apply {
             contentDescription = "Mute microphone"
         }
-        endButton = createCircleButton(R.drawable.sierra_ic_close_24).apply {
+        endButton = createCircleButton(
+            iconRes = options.endConversationIconResId ?: R.drawable.sierra_ic_close_24,
+            backgroundColor = options.voiceStyle.endConversationButtonColor ?: resolvedControlsColor()
+        ).apply {
             contentDescription = "Close conversation"
+        }
+        disclosureLabel = TextView(requireContext()).apply {
+            text = options.disclosureText.orEmpty()
+            setTextColor(options.voiceStyle.conversationDisclosureTextColor)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, options.voiceStyle.conversationDisclosureTextSizeSp)
+            options.voiceStyle.conversationDisclosureFontResId?.let { fontResId ->
+                typeface = ResourcesCompat.getFont(requireContext(), fontResId)
+            }
+            gravity = Gravity.CENTER
+            visibility = if (hasDisclosure) View.VISIBLE else View.GONE
+            setPadding(24.dp, 18.dp, 24.dp, 0)
         }
 
         muteButton.setOnClickListener { muteTapped() }
-        endButton.setOnClickListener { endConversation() }
+        endButton.setOnClickListener { handleEndTapped() }
 
-        container.addView(muteButton, LinearLayout.LayoutParams(controlButtonSizeDp.dp, controlButtonSizeDp.dp).apply {
-            marginEnd = controlButtonSpacingDp.dp
-        })
-        container.addView(endButton, LinearLayout.LayoutParams(controlButtonSizeDp.dp, controlButtonSizeDp.dp))
+        buttonsContainer.addView(
+            muteButton,
+            LinearLayout.LayoutParams(controlButtonSizeDp.dp, controlButtonSizeDp.dp).apply {
+                marginEnd = controlButtonSpacingDp.dp
+            }
+        )
+        buttonsContainer.addView(
+            endButton,
+            LinearLayout.LayoutParams(controlButtonSizeDp.dp, controlButtonSizeDp.dp)
+        )
+        container.addView(buttonsContainer)
+        container.addView(
+            disclosureLabel,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
         return container
     }
 
-    private fun createCircleButton(iconRes: Int): ImageView {
+    private fun createCircleButton(iconRes: Int, backgroundColor: Int): ImageView {
         val bg = GradientDrawable()
         bg.shape = GradientDrawable.OVAL
-        // Some host apps pass transparent color ints unintentionally (e.g. Color(0)).
-        // Fall back to the SDK default so controls remain visible.
-        val controlsColor = options.voiceStyle.controlsColor
-            .takeIf { Color.alpha(it) != 0 }
-            ?: Color.parseColor("#12304C")
-        bg.setColor(controlsColor)
+        bg.setColor(backgroundColor.takeIf { Color.alpha(it) != 0 } ?: Color.parseColor("#12304C"))
         return ImageView(requireContext()).apply {
             setImageResource(iconRes)
             setColorFilter(Color.WHITE)
@@ -501,6 +617,12 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
             isFocusable = true
             contentDescription = ""
         }
+    }
+
+    private fun resolvedControlsColor(): Int {
+        return options.voiceStyle.controlsColor
+            .takeIf { Color.alpha(it) != 0 }
+            ?: Color.parseColor("#12304C")
     }
 
     private fun ensureRendererLoaded() {
@@ -536,7 +658,26 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
             return
         }
         hasReceivedInitialGreeting = true
+        cancelInitialGreetingFallback()
         showLoadingState(false)
+    }
+
+    private fun scheduleInitialGreetingFallbackIfNeeded() {
+        if (
+            hasReceivedInitialGreeting ||
+            hasReceivedInitialAudioMessage ||
+            initialGreetingFallbackRunnable != null
+        ) {
+            return
+        }
+        val runnable = Runnable { markInitialGreetingReceivedIfNeeded() }
+        initialGreetingFallbackRunnable = runnable
+        mainHandler.postDelayed(runnable, initialGreetingFallbackDelayMs)
+    }
+
+    private fun cancelInitialGreetingFallback() {
+        initialGreetingFallbackRunnable?.let { mainHandler.removeCallbacks(it) }
+        initialGreetingFallbackRunnable = null
     }
 
     private fun startWaveformAnimation() {
@@ -573,20 +714,24 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
             VoiceSessionManager.State.CONNECTING -> {
                 setControlButtonsEnabled(true)
                 showLoadingState(!hasReceivedInitialGreeting)
+                cancelInitialGreetingFallback()
                 stopWaveformAnimation()
             }
             VoiceSessionManager.State.LISTENING -> {
-                markInitialGreetingReceivedIfNeeded()
+                showLoadingState(!hasReceivedInitialGreeting)
+                scheduleInitialGreetingFallbackIfNeeded()
                 setControlButtonsEnabled(true)
                 stopWaveformAnimation()
             }
             VoiceSessionManager.State.SPEAKING -> {
-                markInitialGreetingReceivedIfNeeded()
+                showLoadingState(!hasReceivedInitialGreeting)
+                cancelInitialGreetingFallback()
                 setControlButtonsEnabled(true)
                 startWaveformAnimation()
             }
             VoiceSessionManager.State.ENDED -> {
-                markInitialGreetingReceivedIfNeeded()
+                showLoadingState(false)
+                cancelInitialGreetingFallback()
                 stopWaveformAnimation()
                 setControlButtonsEnabled(false)
             }
@@ -625,10 +770,10 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         isMuted = !isMuted
         if (isMuted) {
             voiceSession?.pauseListening()
-            muteButton.setImageResource(R.drawable.sierra_ic_mic_off_24)
+            muteButton.setImageResource(options.mutedIconResId ?: R.drawable.sierra_ic_mic_off_24)
         } else {
             voiceSession?.resumeListening()
-            muteButton.setImageResource(R.drawable.sierra_ic_mic_24)
+            muteButton.setImageResource(options.muteIconResId ?: R.drawable.sierra_ic_mic_24)
         }
     }
 
@@ -670,55 +815,85 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         voiceCallbacks?.onResumeTokenReceived(token)
     }
 
+    override fun onReceiveInitialAudio() {
+        hasReceivedInitialAudioMessage = true
+        cancelInitialGreetingFallback()
+    }
+
+    override fun onStartInitialAudioPlayback() {
+        markInitialGreetingReceivedIfNeeded()
+    }
+
     override fun onReceiveAttachments(attachments: List<Map<String, Any?>>) {
-        if (attachments.isNotEmpty()) {
-            Handler(Looper.getMainLooper()).post {
-                markInitialGreetingReceivedIfNeeded()
+        val (secretRefreshAttachments, renderableAttachments) = attachments.partition {
+            SecretRefreshOrchestrator.isSecretRefreshAttachment(it)
+        }
+        if (secretRefreshAttachments.isNotEmpty()) {
+            val orchestrator = secretRefreshOrchestrator
+            if (orchestrator != null) {
+                orchestrator.setCallbacks(voiceCallbacks)
+                secretRefreshAttachments.forEach { orchestrator.handle(it) }
+            } else {
+                Log.w(VOICE_TAG, "Received secret_refresh attachment but no orchestrator is registered")
             }
         }
 
-        if (attachments.isEmpty()) {
+        if (renderableAttachments.isEmpty()) {
             return
         }
 
-        val signature = canonicalizeForSignature(attachments)
+        val shouldClearAttachments = renderableAttachments.any(::isClearConversationAttachment)
+        val attachmentsToRender = renderableAttachments.filterNot(::isClearConversationAttachment)
+
+        if (shouldClearAttachments) {
+            lastRenderableAttachmentsSignature = null
+            clearConversation()
+        }
+
+        if (attachmentsToRender.isEmpty()) {
+            return
+        }
+
+        val signature = canonicalizeForSignature(attachmentsToRender)
         if (signature == lastRenderableAttachmentsSignature) {
             return
         }
         lastRenderableAttachmentsSignature = signature
 
-        val agentAttachments = attachments.toAgentAttachments()
+        val agentAttachments = attachmentsToRender.toAgentAttachments()
 
-        Handler(Looper.getMainLooper()).post {
-            if (agentAttachments.isNotEmpty()) {
-                voiceCallbacks?.onAgentAttachment(agentAttachments)
-            }
-
-            if (rendererFailed) {
-                return@post
-            }
-            ensureRendererLoaded()
-            if (rendererFailed) {
-                return@post
-            }
-            if (!hasShownFirstAttachment) {
-                hasShownFirstAttachment = true
-                placeholderContainer.visibility = View.GONE
-                rendererView?.visibility = View.VISIBLE
-            }
-            rendererView?.pushAttachments(attachments)
+        if (agentAttachments.isNotEmpty()) {
+            voiceCallbacks?.onAgentAttachment(agentAttachments)
         }
+
+        if (rendererFailed) {
+            return
+        }
+        ensureRendererLoaded()
+        if (rendererFailed) {
+            return
+        }
+        if (!hasShownFirstAttachment) {
+            hasShownFirstAttachment = true
+            placeholderContainer.visibility = View.GONE
+            rendererView?.visibility = View.VISIBLE
+        }
+        rendererView?.pushAttachments(attachmentsToRender)
+    }
+
+    private fun clearConversation() {
+        rendererView?.clearConversation()
     }
 
     override fun onChangeState(state: VoiceSessionManager.State) {
-        Handler(Looper.getMainLooper()).post {
+        mainHandler.post {
             updateUIForState(state)
         }
     }
 
     override fun onError(error: Throwable) {
         Log.e(VOICE_TAG, "Voice session error", error)
-        Handler(Looper.getMainLooper()).post {
+        mainHandler.post {
             if (isExternalAudioInterruptionError(error)) {
                 endConversationForExit()
                 return@post
@@ -729,7 +904,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
     }
 
     override fun onEnd() {
-        Handler(Looper.getMainLooper()).post {
+        mainHandler.post {
             updateUIForState(VoiceSessionManager.State.ENDED)
             shutdownVoiceSessionIfNeeded()
             deliverVoiceEndedIfNeeded()
@@ -753,7 +928,16 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
     }
 
     override fun onLinkClick(url: Uri) {
-        if (controller?.conversationEventListener?.onLinkClick(url) == true) {
+        if (voiceCallbacks?.onLinkClick(url) == true) {
+            Log.i(VOICE_TAG, "External URL (${url.logSafeDescription()}) handled by host app")
+            return
+        }
+        // Prefer VoiceCallbacks now that it inherits AgentEventListener, but keep the
+        // conversationEventListener fallback for older direct-voice integrations that handled
+        // mobile-renderer links there. If both are different objects and the voice callback returns
+        // false, both may observe the URL before the SDK falls back to Intent.ACTION_VIEW.
+        val conversationEventListener = controller?.conversationEventListener
+        if (conversationEventListener !== voiceCallbacks && conversationEventListener?.onLinkClick(url) == true) {
             Log.i(VOICE_TAG, "External URL (${url.logSafeDescription()}) handled by host app")
             return
         }

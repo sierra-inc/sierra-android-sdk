@@ -514,6 +514,7 @@ class AgentChatFragment : Fragment() {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.userAgentString = generateUserAgent(requireContext())
+            settings.applySierraSecurityDefaults()
             webViewClient = chatWebViewClient
             webChromeClient = object : WebChromeClient() {
                 override fun onShowFileChooser(
@@ -977,6 +978,7 @@ private class ChatWebViewInterface(
         fun doWebViewPrint() {
             // Create a WebView object specifically for printing
             val webView = WebView(this.context)
+            webView.settings.applySierraSecurityDefaults()
             webView.webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) =
                     false

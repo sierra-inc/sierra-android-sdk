@@ -18,6 +18,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Base64
 import android.util.Log
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
@@ -37,6 +38,8 @@ import kotlin.math.sqrt
 internal interface VoiceSessionDelegate {
     fun onReceiveCredentials(conversationID: String, encryptionKey: String?)
     fun onReceiveAttachments(attachments: List<Map<String, Any?>>)
+    fun onReceiveInitialAudio() {}
+    fun onStartInitialAudioPlayback() {}
     fun onChangeState(state: VoiceSessionManager.State)
     fun onError(error: Throwable)
     fun onEnd()
@@ -69,11 +72,11 @@ internal class VoiceSessionManager(
     private val disableInterruptions: Boolean = false,
     private val localeTag: String = Locale.getDefault().toLanguageTag(),
     private val agentParameters: Map<String, String> = emptyMap(),
-    private val allowInsecureLocalConnections: Boolean = false,
+    customizeOkHttpClient: ((OkHttpClient.Builder) -> Unit)? = null,
     private val enableText: Boolean = true,
     private val forwardAgentAttachments: Boolean = true,
     private val delegate: VoiceSessionDelegate
-) {
+) : SecretRefreshVoiceSession {
     private val conversationId: String = conversationId ?: UUID.randomUUID().toString()
     @Volatile private var resumeToken: String? = resumeToken
 
@@ -108,13 +111,13 @@ internal class VoiceSessionManager(
     private val msgNum = AtomicInteger(0)
     @Volatile private var isSessionRunning = false
     private var hasDeliveredSessionInfo = false
+    @Volatile private var hasDeliveredInitialAudioMessage = false
+    @Volatile private var hasDeliveredInitialAudioPlayback = false
     @Volatile private var isUserListeningPaused = false
     @Volatile private var isSystemListeningPaused = false
     @Volatile private var isSpeakingMuted = false
 
-    private val okHttpClient = buildVoiceOkHttpClient(
-        allowInsecureLocalConnections = allowInsecureLocalConnections
-    )
+    private val okHttpClient = buildVoiceOkHttpClient(customize = customizeOkHttpClient)
     private var webSocket: WebSocket? = null
 
     private var audioRecord: AudioRecord? = null
@@ -181,6 +184,8 @@ internal class VoiceSessionManager(
         state = State.CONNECTING
         isSessionRunning = true
         hasDeliveredSessionInfo = false
+        hasDeliveredInitialAudioMessage = false
+        hasDeliveredInitialAudioPlayback = false
 
         var svpPath = "${config.apiHost.voiceBaseURL}/chat/voice/svp/${config.token}"
         if (!config.target.isNullOrEmpty()) {
@@ -251,6 +256,8 @@ internal class VoiceSessionManager(
     private fun disconnect(sendCloseMessage: Boolean = true, rawReason: String) {
         isSessionRunning = false
         hasDeliveredSessionInfo = false
+        hasDeliveredInitialAudioMessage = false
+        hasDeliveredInitialAudioPlayback = false
         isUserListeningPaused = false
         isSystemListeningPaused = false
         isSpeakingMuted = false
@@ -285,7 +292,7 @@ internal class VoiceSessionManager(
         )
     }
 
-    fun sendAttachmentsClient(attachments: List<Map<String, Any?>>) {
+    override fun sendAttachmentsClient(attachments: List<Map<String, Any?>>) {
         val arr = JSONArray()
         attachments.forEach { arr.put(JSONObject(it)) }
         sendJSON(
@@ -293,6 +300,37 @@ internal class VoiceSessionManager(
                 .put("type", "attachments_client")
                 .put("msgNum", nextMsgNum())
                 .put("subMsg", JSONObject().put("attachments", arr))
+        )
+    }
+
+    override fun sendMemoryUpdateClient(
+        secrets: Map<String, String>?,
+        variables: Map<String, String>?,
+    ) {
+        val subMsg = JSONObject()
+        if (!secrets.isNullOrEmpty()) {
+            subMsg.put("secrets", JSONObject(secrets))
+        }
+        if (!variables.isNullOrEmpty()) {
+            subMsg.put("variables", JSONObject(variables))
+        }
+        if (subMsg.length() == 0) {
+            Log.d(VOICE_TAG, "SVP send: memory_update_client skipped (no variables or secrets)")
+            return
+        }
+
+        // Log keys only, never values.
+        val secretKeys = secrets?.keys?.sorted()?.joinToString(", ").orEmpty()
+        val variableKeys = variables?.keys?.sorted()?.joinToString(", ").orEmpty()
+        Log.d(
+            VOICE_TAG,
+            "SVP send: memory_update_client variableKeys=[$variableKeys] secretKeys=[$secretKeys]"
+        )
+        sendJSON(
+            JSONObject()
+                .put("type", "memory_update_client")
+                .put("msgNum", nextMsgNum())
+                .put("subMsg", subMsg)
         )
     }
 
@@ -401,6 +439,10 @@ internal class VoiceSessionManager(
                         subMsg.optString("mark")
                     } else {
                         null
+                    }
+                    if (!hasDeliveredInitialAudioMessage) {
+                        hasDeliveredInitialAudioMessage = true
+                        mainHandler.post { delegate.onReceiveInitialAudio() }
                     }
                     enqueueAudio(data, mark)
                 }
@@ -597,6 +639,10 @@ internal class VoiceSessionManager(
                 val track = audioTrack ?: continue
                 isPlaying = true
                 mainHandler.post {
+                    if (!hasDeliveredInitialAudioPlayback) {
+                        hasDeliveredInitialAudioPlayback = true
+                        delegate.onStartInitialAudioPlayback()
+                    }
                     if (state == State.LISTENING) {
                         state = State.SPEAKING
                     }

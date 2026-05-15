@@ -3,20 +3,13 @@
 
 package ai.sierra.sdk
 
-import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Color
 import android.os.Build
-import android.util.Log
 import okhttp3.OkHttpClient
 import org.json.JSONArray
 import org.json.JSONObject
-import java.security.SecureRandom
-import java.security.cert.X509Certificate
 import java.util.concurrent.TimeUnit
-import javax.net.ssl.SSLContext
-import javax.net.ssl.TrustManager
-import javax.net.ssl.X509TrustManager
 
 internal const val VOICE_TAG = "AgentVoiceController"
 
@@ -68,27 +61,12 @@ internal fun Int.toHexColor(): String {
     }
 }
 
-@SuppressLint("TrustAllX509TrustManager", "CustomX509TrustManager")
 internal fun buildVoiceOkHttpClient(
-    allowInsecureLocalConnections: Boolean
+    customize: ((OkHttpClient.Builder) -> Unit)? = null,
 ): OkHttpClient {
     val builder = OkHttpClient.Builder()
         .readTimeout(0, TimeUnit.MILLISECONDS)
-
-    if (allowInsecureLocalConnections) {
-        val trustAllManager = object : X509TrustManager {
-            override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {}
-            override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {}
-            override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
-        }
-        val sslContext = SSLContext.getInstance("TLS").apply {
-            init(null, arrayOf<TrustManager>(trustAllManager), SecureRandom())
-        }
-        builder.sslSocketFactory(sslContext.socketFactory, trustAllManager)
-        builder.hostnameVerifier { _, _ -> true }
-        Log.w(VOICE_TAG, "Using trust-all SSL for voice WebSocket")
-    }
-
+    customize?.invoke(builder)
     return builder.build()
 }
 

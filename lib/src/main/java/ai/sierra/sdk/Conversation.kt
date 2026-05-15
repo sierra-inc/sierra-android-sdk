@@ -2,8 +2,8 @@
 
 package ai.sierra.sdk
 
-import android.net.Uri
 import android.net.http.SslError
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.os.Parcelable
@@ -46,7 +46,7 @@ sealed class SecretExpiryResult {
     data class Error(val message: String) : SecretExpiryResult()
 }
 
-interface ConversationEventListener {
+interface ConversationEventListener : AgentEventListener {
     /**
      * Callback invoked when the embedded web UI is ready to be displayed.
      *
@@ -94,19 +94,6 @@ interface ConversationEventListener {
     fun onConversationEnded() {}
 
     /**
-     * Callback invoked when a secret needs to be refreshed. The replyHandler should be invoked with one of:
-     * - SecretExpiryResult.Success(newValue) - a new value for the secret
-     * - SecretExpiryResult.Success(null) - if the secret cannot be provided due to a known condition (e.g. the user has signed out)
-     * - SecretExpiryResult.Error(message) - if the secret cannot be fetched right now, but the request should be retried
-     *
-     * @param secretName The name of the secret that needs refreshing
-     * @param replyHandler Function to call with the refresh result
-     */
-    fun onSecretExpiry(secretName: String, replyHandler: (SecretExpiryResult) -> Unit) {
-        replyHandler(SecretExpiryResult.Success(null))
-    }
-
-    /**
      * Callback invoked when the conversation list is shown.
      */
     fun onShowConversationList() {}
@@ -130,12 +117,6 @@ interface ConversationEventListener {
         sslErrorHandler?.cancel()
     }
 
-    /**
-     * Callback invoked on the main thread when the user taps a link in the chat or in a voice
-     * attachment. Return `true` if the host app handled the link in-app, or `false` to let the
-     * SDK fall back to `Intent.ACTION_VIEW`.
-     */
-    fun onLinkClick(url: Uri): Boolean = false
 }
 
 /**
