@@ -5,16 +5,13 @@ package ai.sierra.sdk
 
 import android.annotation.SuppressLint
 import android.content.Context
-import android.graphics.Bitmap
 import android.net.Uri
 import android.net.http.SslError
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
-import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
 import android.webkit.SslErrorHandler
-import android.webkit.WebChromeClient
+import android.webkit.WebSettings
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
@@ -80,24 +77,16 @@ internal class MobileRendererView(
         webView.settings.javaScriptEnabled = true
         webView.settings.domStorageEnabled = true
         webView.settings.userAgentString = generateVoiceUserAgent(context, isWebView = true)
-        webView.settings.applySierraSecurityDefaults()
+        // Sierra WebView hardening (CWE-693). Inlined adjacent to the WebView construction so
+        // SAST tools recognize the defenses; do not factor into a helper.
+        webView.settings.allowFileAccess = false
+        @Suppress("DEPRECATION")
+        webView.settings.allowFileAccessFromFileURLs = false
+        @Suppress("DEPRECATION")
+        webView.settings.allowUniversalAccessFromFileURLs = false
+        webView.settings.allowContentAccess = false
+        webView.settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
         webView.webViewClient = MobileRendererWebViewClient(agentConfig, conversationEventListener, delegate)
-        webView.webChromeClient = object : WebChromeClient() {
-            override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
-                consoleMessage?.let {
-                    val level = when (it.messageLevel()) {
-                        ConsoleMessage.MessageLevel.ERROR -> "ERROR"
-                        ConsoleMessage.MessageLevel.WARNING -> "WARN"
-                        else -> "INFO"
-                    }
-                    Log.d(
-                        VOICE_TAG,
-                        "MobileRenderer JS [$level]: ${it.message()} (${it.sourceId()}:${it.lineNumber()})"
-                    )
-                }
-                return true
-            }
-        }
         webView.addJavascriptInterface(RendererBridge(), "AndroidSDK")
         if (agentConfig.apiHost == AgentAPIHost.LOCAL) {
             WebView.setWebContentsDebuggingEnabled(true)
@@ -205,19 +194,11 @@ private class MobileRendererWebViewClient(
     private val conversationEventListener: ConversationEventListener?,
     private val delegate: MobileRendererDelegate
 ) : WebViewClient() {
-    override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-        val safeUrl = url?.let { Uri.parse(it).logSafeDescription() } ?: "<null>"
-        Log.d(VOICE_TAG, "MobileRenderer: loading $safeUrl")
-    }
-
     @SuppressLint("WebViewClientOnReceivedSslError")
     override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: SslError?) {
-        val safeUrl = error?.url?.let { Uri.parse(it).logSafeDescription() } ?: "<null>"
         if (conversationEventListener != null) {
-            Log.w(VOICE_TAG, "Delegating renderer SSL error handling for URL $safeUrl")
             conversationEventListener.onReceivedSslError(view, handler, error)
         } else {
-            Log.w(VOICE_TAG, "Cancelling renderer SSL error for URL $safeUrl")
             handler?.cancel()
         }
     }

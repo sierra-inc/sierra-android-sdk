@@ -319,13 +319,6 @@ internal class VoiceSessionManager(
             return
         }
 
-        // Log keys only, never values.
-        val secretKeys = secrets?.keys?.sorted()?.joinToString(", ").orEmpty()
-        val variableKeys = variables?.keys?.sorted()?.joinToString(", ").orEmpty()
-        Log.d(
-            VOICE_TAG,
-            "SVP send: memory_update_client variableKeys=[$variableKeys] secretKeys=[$secretKeys]"
-        )
         sendJSON(
             JSONObject()
                 .put("type", "memory_update_client")

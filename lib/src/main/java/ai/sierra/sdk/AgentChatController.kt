@@ -27,6 +27,7 @@ import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
@@ -466,7 +467,7 @@ class AgentChatFragment : Fragment() {
                     context = if (args.agentConfig.persistence == PersistenceMode.DISK)
                         requireContext().applicationContext else null
                 )
-                Log.i(TAG, "Created fallback storage after process death (mode=${args.agentConfig.persistence})")
+                Log.i(TAG, "Created fallback storage after process death")
             }
         }
     }
@@ -514,7 +515,15 @@ class AgentChatFragment : Fragment() {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.userAgentString = generateUserAgent(requireContext())
-            settings.applySierraSecurityDefaults()
+            // Sierra WebView hardening (CWE-693). Inlined adjacent to the WebView construction so
+            // SAST tools recognize the defenses; do not factor into a helper.
+            settings.allowFileAccess = false
+            @Suppress("DEPRECATION")
+            settings.allowFileAccessFromFileURLs = false
+            @Suppress("DEPRECATION")
+            settings.allowUniversalAccessFromFileURLs = false
+            settings.allowContentAccess = false
+            settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
             webViewClient = chatWebViewClient
             webChromeClient = object : WebChromeClient() {
                 override fun onShowFileChooser(
@@ -857,12 +866,11 @@ private class ChatWebViewClient(
     @SuppressLint("WebViewClientOnReceivedSslError")
     override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: SslError?) {
         if (listener != null) {
-            Log.w(TAG, "Delegating SSL error handling to conversation listener for URL ${error?.url}")
+            Log.w(TAG, "Delegating SSL error handling to conversation listener")
             listener.onReceivedSslError(view, handler, error)
             return
         }
 
-        Log.w(TAG, "Cancelling SSL error for URL ${error?.url}")
         handler?.cancel()
 
         if (error?.url?.startsWith(agentConfig.url) == true) {
@@ -876,10 +884,7 @@ private class ChatWebViewClient(
         error: WebResourceError
     ) {
         if (request.url.toString().startsWith(agentConfig.url)) {
-            Log.e(
-                TAG,
-                "Received error trying to load the main URL: code=${error.errorCode} description=${error.description}"
-            )
+            Log.e(TAG, "Received error trying to load the main URL")
             handleMainUrlLoadFailure(view)
         }
     }
@@ -890,11 +895,8 @@ private class ChatWebViewClient(
 
         if (request.isForMainFrame && (url.host != baseUri.host || url.scheme != baseUri.scheme)) {
             if (listener?.onLinkClick(url) == true) {
-                Log.i(TAG, "External URL (${url.logSafeDescription()}) handled by host app")
                 return true
             }
-
-            Log.i(TAG, "External URL (${url.logSafeDescription()}) loaded, will open in the browser")
 
             val intent = Intent(Intent.ACTION_VIEW, url).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) // Ensures it works in non-Activity contexts
@@ -978,7 +980,15 @@ private class ChatWebViewInterface(
         fun doWebViewPrint() {
             // Create a WebView object specifically for printing
             val webView = WebView(this.context)
-            webView.settings.applySierraSecurityDefaults()
+            // Sierra WebView hardening (CWE-693). Inlined adjacent to the WebView construction so
+            // SAST tools recognize the defenses; do not factor into a helper.
+            webView.settings.allowFileAccess = false
+            @Suppress("DEPRECATION")
+            webView.settings.allowFileAccessFromFileURLs = false
+            @Suppress("DEPRECATION")
+            webView.settings.allowUniversalAccessFromFileURLs = false
+            webView.settings.allowContentAccess = false
+            webView.settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
             webView.webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) =
                     false

@@ -113,7 +113,6 @@ internal class SecretRefreshOrchestrator(
         executeOnWorker worker@{
             if (cancelled) return@worker
             if (inFlightSecretNames.contains(secretName)) {
-                Log.d(VOICE_TAG, "SecretRefreshOrchestrator: refresh already in flight for $secretName, ignoring duplicate")
                 return@worker
             }
             inFlightSecretNames.add(secretName)
@@ -157,12 +156,10 @@ internal class SecretRefreshOrchestrator(
         if (cancelled) return
         val callbacks = callbacksRef.get()
         if (callbacks == null) {
-            Log.d(VOICE_TAG, "SecretRefreshOrchestrator: no callbacks registered, dropping refresh for ${pending.secretName}")
+            Log.d(VOICE_TAG, "SecretRefreshOrchestrator: no callbacks registered, dropping refresh")
             inFlightSecretNames.remove(pending.secretName)
             return
         }
-
-        Log.d(VOICE_TAG, "SecretRefreshOrchestrator: attempt $attemptNumber for ${pending.secretName}")
 
         mainHandler.post {
             callbacks.onSecretExpiry(pending.secretName) { result ->
@@ -176,13 +173,13 @@ internal class SecretRefreshOrchestrator(
                             } else {
                                 Log.d(
                                     VOICE_TAG,
-                                    "SecretRefreshOrchestrator: host returned nil value for ${pending.secretName}; refresh not supported, stopping"
+                                    "SecretRefreshOrchestrator: host returned nil value; refresh not supported, stopping"
                                 )
                                 inFlightSecretNames.remove(pending.secretName)
                             }
                         }
                         is SecretExpiryResult.Error -> {
-                            handleFailure(pending, attemptNumber, retryDelaySeconds, result.message)
+                            handleFailure(pending, attemptNumber, retryDelaySeconds)
                         }
                     }
                 }
@@ -193,7 +190,6 @@ internal class SecretRefreshOrchestrator(
     private fun applySuccess(secretName: String, value: String) {
         val voiceSession = voiceSessionRef.get()
         if (voiceSession == null) {
-            Log.d(VOICE_TAG, "SecretRefreshOrchestrator: voiceSession was deallocated before refresh applied for $secretName")
             inFlightSecretNames.remove(secretName)
             return
         }
@@ -213,15 +209,13 @@ internal class SecretRefreshOrchestrator(
         pending: PendingRefresh,
         attemptNumber: Int,
         retryDelaySeconds: Double,
-        message: String,
     ) {
         if (attemptNumber >= pending.retryConfig.maxAttempts) {
-            Log.d(VOICE_TAG, "SecretRefreshOrchestrator: giving up on ${pending.secretName} after $attemptNumber attempt(s): $message")
+            Log.d(VOICE_TAG, "SecretRefreshOrchestrator: giving up after max attempts")
             inFlightSecretNames.remove(pending.secretName)
             return
         }
         val nextDelay = min(retryDelaySeconds * 2, pending.retryConfig.maxDelaySeconds)
-        Log.d(VOICE_TAG, "SecretRefreshOrchestrator: attempt $attemptNumber for ${pending.secretName} failed ($message); retrying in ${retryDelaySeconds}s")
         if (retryDelaySeconds <= 0.0) {
             executeOnWorker {
                 attempt(pending, attemptNumber + 1, nextDelay)

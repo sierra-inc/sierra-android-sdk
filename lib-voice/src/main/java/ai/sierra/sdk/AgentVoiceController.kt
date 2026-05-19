@@ -807,7 +807,6 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
     }
 
     override fun onReceiveCredentials(conversationID: String, encryptionKey: String?) {
-        Log.d(VOICE_TAG, "Voice credentials received for conversationId=$conversationID")
         voiceCallbacks?.onSessionInfoReceived(conversationID, encryptionKey)
     }
 
@@ -929,7 +928,6 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
 
     override fun onLinkClick(url: Uri) {
         if (voiceCallbacks?.onLinkClick(url) == true) {
-            Log.i(VOICE_TAG, "External URL (${url.logSafeDescription()}) handled by host app")
             return
         }
         // Prefer VoiceCallbacks now that it inherits AgentEventListener, but keep the
@@ -938,18 +936,16 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         // false, both may observe the URL before the SDK falls back to Intent.ACTION_VIEW.
         val conversationEventListener = controller?.conversationEventListener
         if (conversationEventListener !== voiceCallbacks && conversationEventListener?.onLinkClick(url) == true) {
-            Log.i(VOICE_TAG, "External URL (${url.logSafeDescription()}) handled by host app")
             return
         }
 
-        Log.i(VOICE_TAG, "External URL (${url.logSafeDescription()}) loaded, will open in the browser")
         val intent = Intent(Intent.ACTION_VIEW, url).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         try {
             requireContext().startActivity(intent)
         } catch (e: Throwable) {
-            Log.w(VOICE_TAG, "Failed to start activity for URL (${url.logSafeDescription()})", e)
+            Log.w(VOICE_TAG, "Failed to start activity for external URL", e)
         }
     }
 
