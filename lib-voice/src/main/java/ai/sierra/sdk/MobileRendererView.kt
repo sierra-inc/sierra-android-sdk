@@ -7,6 +7,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.net.Uri
 import android.net.http.SslError
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.webkit.JavascriptInterface
@@ -58,11 +59,15 @@ internal class MobileRendererView(
     private val conversationEventListener: ConversationEventListener?,
     private val delegate: MobileRendererDelegate
 ) : FrameLayout(context) {
-    private val webView: WebView = WebView(context)
+    private val webView: WebView
     private var isReady = false
     private val pendingBatches = mutableListOf<String>()
 
     init {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            WebView.startSafeBrowsing(context) {}
+        }
+        webView = WebView(context)
         addView(webView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
         setupWebView()
         loadRendererPage()

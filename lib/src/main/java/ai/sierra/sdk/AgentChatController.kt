@@ -496,6 +496,9 @@ class AgentChatFragment : Fragment() {
             args.options.chatStyle.colors.background?.let { setBackgroundColor(it) }
         }
 
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            WebView.startSafeBrowsing(requireContext()) {}
+        }
         webView = WebView(requireContext()).apply {
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -979,6 +982,9 @@ private class ChatWebViewInterface(
         var heldWebView: WebView? = null
         fun doWebViewPrint() {
             // Create a WebView object specifically for printing
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                WebView.startSafeBrowsing(this.context) {}
+            }
             val webView = WebView(this.context)
             // Sierra WebView hardening (CWE-693). Inlined adjacent to the WebView construction so
             // SAST tools recognize the defenses; do not factor into a helper.
