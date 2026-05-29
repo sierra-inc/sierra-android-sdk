@@ -244,6 +244,23 @@ data class AgentChatControllerOptions(
     var showSpeakerLabels: Boolean? = null,
 
     /**
+     * Whether to show per-message avatars for agents. When enabled, the chat
+     * shows avatars next to live agent messages using image URLs provided by
+     * the contact center. If agentAvatarURL is also set, that image is shown
+     * next to virtual agent messages. When null and useConfiguredStyle is true,
+     * the server-configured value is used.
+     */
+    var showAvatars: Boolean? = null,
+
+    /**
+     * HTTPS URL of an image to show next to virtual agent messages when
+     * showAvatars is enabled. Values are trimmed and must be 2048 characters or
+     * fewer. When null and useConfiguredStyle is true, the server-configured
+     * value is used.
+     */
+    var agentAvatarURL: String? = null,
+
+    /**
      * Controls whether the message label (speaker name and timestamp) is shown
      * above or below chat message bubbles. When DEFAULT and useConfiguredStyle
      * is true, the server-configured value is used.
@@ -633,6 +650,8 @@ class AgentChatFragment : Fragment() {
         )
         options.showTimestamps?.let { brandMap["showTimestamps"] = it }
         options.showSpeakerLabels?.let { brandMap["showBotName"] = it }
+        options.showAvatars?.let { brandMap["showAvatars"] = it }
+        options.agentAvatarURL?.let { brandMap["agentAvatarURL"] = it }
         // If locale auto-detect or server-configured chat strings are enabled, remove any messages
         // that are set to their default value so server-configured values or locale defaults can win.
         if (options.shouldOmitDefaultChatStrings()) {
@@ -1066,6 +1085,28 @@ private class ChatWebViewInterface(
     @JavascriptInterface
     fun onSecretExpiry(secretName: String, callbackId: String) {
         listener?.onSecretExpiry(secretName) { result ->
+            val jsCode = when (result) {
+                is SecretExpiryResult.Success -> {
+                    val valueJson = if (result.value != null) {
+                        JSONObject.quote(result.value)
+                    } else {
+                        "null"
+                    }
+                    "window.__sierraAndroidResolveCallback(${JSONObject.quote(callbackId)}, $valueJson);"
+                }
+                is SecretExpiryResult.Error -> {
+                    "window.__sierraAndroidResolveCallback(${JSONObject.quote(callbackId)}, null, ${JSONObject.quote(result.message)});"
+                }
+            }
+            handler.post {
+                webView.evaluateJavascript(jsCode, null)
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun onUserIdentityTokenExpiry(callbackId: String) {
+        listener?.onUserIdentityTokenExpiry { result ->
             val jsCode = when (result) {
                 is SecretExpiryResult.Success -> {
                     val valueJson = if (result.value != null) {

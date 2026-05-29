@@ -178,6 +178,16 @@ internal class MainThreadConversationEventListener(private val listener: Convers
         }
     }
 
+    override fun onUserIdentityTokenExpiry(replyHandler: (SecretExpiryResult) -> Unit) {
+        handler.post {
+            if (listener != null) {
+                listener.onUserIdentityTokenExpiry(replyHandler)
+            } else {
+                replyHandler(SecretExpiryResult.Success(null))
+            }
+        }
+    }
+
     override fun onShowConversationList() {
         handler.post {
             listener?.onShowConversationList()
