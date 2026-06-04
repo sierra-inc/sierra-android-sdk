@@ -43,6 +43,7 @@ internal interface VoiceSessionDelegate {
     fun onChangeState(state: VoiceSessionManager.State)
     fun onError(error: Throwable)
     fun onEnd()
+    fun onContinueInChat() {}
     fun onReceiveResumeToken(token: String) {}
 }
 
@@ -453,9 +454,18 @@ internal class VoiceSessionManager(
             }
             "clear" -> clearAudioQueue()
             "end_conversation" -> {
-                sendClose(AgentVoiceCloseReason.NORMAL.rawValue)
-                disconnect(sendCloseMessage = false)
-                mainHandler.post { delegate.onEnd() }
+                // A server-initiated voice->chat handoff ends the call with the continue_in_chat
+                // custom reason. Surface it distinctly so the host can continue the same
+                // conversation in chat; any other end is a normal session end.
+                if (subMsg.optString("customReason") == AgentVoiceCloseReason.CONTINUE_IN_CHAT.rawValue) {
+                    sendClose(AgentVoiceCloseReason.CONTINUE_IN_CHAT.rawValue)
+                    disconnect(sendCloseMessage = false, closeReason = AgentVoiceCloseReason.CONTINUE_IN_CHAT)
+                    mainHandler.post { delegate.onContinueInChat() }
+                } else {
+                    sendClose(AgentVoiceCloseReason.NORMAL.rawValue)
+                    disconnect(sendCloseMessage = false)
+                    mainHandler.post { delegate.onEnd() }
+                }
             }
             "transfer" -> {
                 sendClose(AgentVoiceCloseReason.TRANSFERRED.rawValue)

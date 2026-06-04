@@ -94,6 +94,16 @@ public data class AgentVoiceStyle(
     val rendererBackgroundColor: Int? = null,
     val muteButtonColor: Int? = null,
     val endConversationButtonColor: Int? = null,
+    /**
+     * Tint color applied to the mute button glyph. Defaults to white. Set this to a darker color
+     * when using a white mute background so the glyph remains visible.
+     */
+    val muteButtonIconColor: Int = Color.WHITE,
+    /**
+     * Tint color applied to the end conversation button glyph. Defaults to white. Set this to a
+     * darker color when using a white end background so the glyph remains visible.
+     */
+    val endConversationButtonIconColor: Int = Color.WHITE,
     val conversationDisclosureTextColor: Int = Color.GRAY,
     /** Optional font resource override for the disclosure shown below the controls. */
     @FontRes val conversationDisclosureFontResId: Int? = null,
@@ -128,7 +138,14 @@ public data class AgentVoiceControllerOptions(
     var mutedIconResId: Int? = null,
     /** Optional vector/SVG drawable resource override for the end conversation button. */
     @DrawableRes
-    var endConversationIconResId: Int? = null
+    var endConversationIconResId: Int? = null,
+    /**
+     * Optional vector/SVG drawable resource override for the central waveform placeholder. The
+     * drawable is rendered as-provided (its own colors), with no tint applied. It is shown
+     * statically, without the speaking-state pulse animation applied to the default waveform.
+     */
+    @DrawableRes
+    var voiceWaveformIconResId: Int? = null
 ) : Parcelable {
     @Deprecated("Use voiceAgentParameters instead.")
     @IgnoredOnParcel
@@ -170,7 +187,7 @@ public data class AgentVoiceControllerOptions(
     internal var switchToChatLabel: String = "Continue in chat"
 
     @IgnoredOnParcel
-    internal var onSwitchToChat: (() -> Unit)? = null
+    internal var onSwitchToChat: ((agentInitiated: Boolean) -> Unit)? = null
 
     /**
      * When true, tapping End closes the SVP session with the `continue_in_chat` close reason and
@@ -439,12 +456,12 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         voiceCallbacks?.onVoiceEnded()
     }
 
-    private fun deliverSwitchToChatIfNeeded() {
+    private fun deliverSwitchToChatIfNeeded(agentInitiated: Boolean) {
         if (voiceExitState != VoiceExitState.NONE) {
             return
         }
         voiceExitState = VoiceExitState.SWITCHED_TO_CHAT
-        options.onSwitchToChat?.invoke()
+        options.onSwitchToChat?.invoke(agentInitiated)
     }
 
     private fun handleEndTapped() {
@@ -508,8 +525,15 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         placeholderContainer.addView(loadingIndicator)
 
         placeholderIcon = ImageView(requireContext()).apply {
-            setImageResource(R.drawable.sierra_ic_waveform_40)
-            scaleType = ImageView.ScaleType.CENTER
+            val waveformResId = options.voiceWaveformIconResId
+            if (waveformResId != null) {
+                setImageResource(waveformResId)
+                // Scale custom art to fit so non-40dp assets are not clipped.
+                scaleType = ImageView.ScaleType.FIT_CENTER
+            } else {
+                setImageResource(R.drawable.sierra_ic_waveform_40)
+                scaleType = ImageView.ScaleType.CENTER
+            }
             val inset = ((placeholderWaveformBoxSizeDp - placeholderWaveformIconSizeDp) / 2).dp
             setPadding(inset, inset, inset, inset)
             visibility = View.GONE
@@ -556,13 +580,15 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         }
         muteButton = createCircleButton(
             iconRes = options.muteIconResId ?: R.drawable.sierra_ic_mic_24,
-            backgroundColor = options.voiceStyle.muteButtonColor ?: resolvedControlsColor()
+            backgroundColor = options.voiceStyle.muteButtonColor ?: resolvedControlsColor(),
+            iconColor = options.voiceStyle.muteButtonIconColor
         ).apply {
             contentDescription = "Mute microphone"
         }
         endButton = createCircleButton(
             iconRes = options.endConversationIconResId ?: R.drawable.sierra_ic_close_24,
-            backgroundColor = options.voiceStyle.endConversationButtonColor ?: resolvedControlsColor()
+            backgroundColor = options.voiceStyle.endConversationButtonColor ?: resolvedControlsColor(),
+            iconColor = options.voiceStyle.endConversationButtonIconColor
         ).apply {
             contentDescription = "Close conversation"
         }
@@ -602,13 +628,13 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         return container
     }
 
-    private fun createCircleButton(iconRes: Int, backgroundColor: Int): ImageView {
+    private fun createCircleButton(iconRes: Int, backgroundColor: Int, iconColor: Int): ImageView {
         val bg = GradientDrawable()
         bg.shape = GradientDrawable.OVAL
         bg.setColor(backgroundColor.takeIf { Color.alpha(it) != 0 } ?: Color.parseColor("#12304C"))
         return ImageView(requireContext()).apply {
             setImageResource(iconRes)
-            setColorFilter(Color.WHITE)
+            setColorFilter(iconColor)
             val iconInset = ((controlButtonSizeDp - controlIconMaxSizeDp) / 2).dp
             setPadding(iconInset, iconInset, iconInset, iconInset)
             background = bg
@@ -681,6 +707,10 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
     }
 
     private fun startWaveformAnimation() {
+        // A customer-supplied waveform is rendered as-provided, so it is not animated.
+        if (options.voiceWaveformIconResId != null) {
+            return
+        }
         if (placeholderContainer.visibility != View.VISIBLE) {
             return
         }
@@ -779,7 +809,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
 
     private fun switchToChatTapped() {
         shutdownVoiceSessionIfNeeded(AgentVoiceCloseReason.CONTINUE_IN_CHAT)
-        deliverSwitchToChatIfNeeded()
+        deliverSwitchToChatIfNeeded(agentInitiated = false)
     }
 
     private fun userFacingErrorMessage(): String {
@@ -907,6 +937,17 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
             updateUIForState(VoiceSessionManager.State.ENDED)
             shutdownVoiceSessionIfNeeded()
             deliverVoiceEndedIfNeeded()
+        }
+    }
+
+    override fun onContinueInChat() {
+        mainHandler.post {
+            updateUIForState(VoiceSessionManager.State.ENDED)
+            // The server already closed the SVP session for the handoff; mark it shut down and
+            // deliver the switch-to-chat exit so the coordinator presents chat. The exit-state
+            // guard prevents double-firing if the user had also tapped the chat-bubble action.
+            shutdownVoiceSessionIfNeeded()
+            deliverSwitchToChatIfNeeded(agentInitiated = true)
         }
     }
 

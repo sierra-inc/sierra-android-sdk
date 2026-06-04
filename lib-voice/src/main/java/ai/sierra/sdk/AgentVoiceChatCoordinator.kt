@@ -76,6 +76,9 @@ public class AgentVoiceChatCoordinator(
     // One-shot handoff latch: set by the voice switch action and consumed by the next
     // makeChatController() call so only the first chat presentation after handoff seeds storage.
     private val pendingContinueInChat = AtomicBoolean(false)
+    // True when the pending switch was agent-initiated (vs a manual "Continue in chat" tap); the
+    // seeded chat state then drives the agent on resume instead of switching silently.
+    private val pendingAgentHandoff = AtomicBoolean(false)
 
     init {
         restorePersistedConversationState()
@@ -99,9 +102,9 @@ public class AgentVoiceChatCoordinator(
         if (shouldResumeConversation) {
             voiceOptions.resumeReason = AgentVoiceResumeReason.CONTINUE_IN_VOICE
         }
+        voiceOptions.onSwitchToChat = { agentInitiated -> handleSwitchToChat(agentInitiated) }
         if (options.canSwitchToChat) {
             voiceOptions.canSwitchToChat = true
-            voiceOptions.onSwitchToChat = { handleSwitchToChat() }
             voiceOptions.endRoutesToChat = options.autoShowChatOnEnd
         }
 
@@ -116,7 +119,7 @@ public class AgentVoiceChatCoordinator(
         // chat. The first chat controller after that transition seeds storage, then clears it so
         // normal chat openings do not overwrite current state.
         if (pendingContinueInChat.compareAndSet(true, false)) {
-            seedChatContinuationStateIfAvailable()
+            seedChatContinuationStateIfAvailable(pendingAgentHandoff.getAndSet(false))
         }
 
         val chatOptions = options.chatOptions.copy()
@@ -134,12 +137,13 @@ public class AgentVoiceChatCoordinator(
         encryptionKey = null
         voiceResumeToken = null
         pendingContinueInChat.set(false)
+        pendingAgentHandoff.set(false)
         agent.resetConversation()
     }
 
     override fun onVoiceEnded() {
         if (options.canSwitchToChat && options.autoShowChatOnEnd) {
-            handleSwitchToChat()
+            handleSwitchToChat(agentInitiated = false)
             return
         }
         resetConversation()
@@ -176,20 +180,27 @@ public class AgentVoiceChatCoordinator(
         this.voiceResumeToken = token
     }
 
-    private fun handleSwitchToChat() {
+    private fun handleSwitchToChat(agentInitiated: Boolean) {
         // The next makeChatController() call consumes this latch to seed the web chat state for
         // this explicit voice-to-chat handoff. Plain chat opens leave the latch false.
         pendingContinueInChat.set(true)
+        pendingAgentHandoff.set(agentInitiated)
         delegate?.coordinatorDidRequestShowingChat(this)
     }
 
-    private fun seedChatContinuationStateIfAvailable() {
+    private fun seedChatContinuationStateIfAvailable(agentInitiated: Boolean) {
         val conversationID = conversationID ?: return
         val encryptionKey = encryptionKey ?: return
         val state = JSONObject()
             .put("conversationID", conversationID)
             .put("encryptionKey", encryptionKey)
-            .put("continueInChatOnResume", true)
+        // An agent-initiated handoff drives the chat agent (the embed sends a continue-in-chat
+        // client event on resume); a manual switch stays silent. The embed reads exactly one flag.
+        if (agentInitiated) {
+            state.put("agentHandoffOnResume", true)
+        } else {
+            state.put("continueInChatOnResume", true)
+        }
         voiceConversationID?.let { id ->
             state.put("voiceConversationID", id)
         }
