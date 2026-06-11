@@ -165,6 +165,20 @@ data class AgentChatControllerOptions(
     val chatStyle: ChatStyle = ChatStyle(),
 
     /**
+     * Inline SVG markup for the chat send button. Replaces the default send arrow (including
+     * its background) when provided. Overridden by the server-configured value if useConfiguredStyle
+     * is true.
+     */
+    var sendButtonSVG: String? = null,
+
+    /**
+     * Inline SVG markup for the send button when it is disabled (e.g. the input is empty).
+     * Falls back to sendButtonSVG when not provided. Overridden by the server-configured value
+     * if useConfiguredStyle is true.
+     */
+    var sendButtonDisabledSVG: String? = null,
+
+    /**
      * Hide the title bar in the fragment that the controller creates. The containing view is then
      * responsible for showing a title/app bar with the agent name.
      */
@@ -191,6 +205,17 @@ data class AgentChatControllerOptions(
     var canPrintTranscript: Boolean = false,
     /** Allow the user to manually end a conversation via a UI */
     var canEndConversation: Boolean = false,
+    /**
+     * Ask the user to confirm before the conversation ends. The confirmation is shown inline
+     * within the chat (covering the transcript and input). Only effective when
+     * [canEndConversation] is true.
+     */
+    var confirmEndConversation: Boolean = false,
+    /**
+     * Show an end conversation button in the chat footer (above the input) while the user is
+     * speaking with a live agent. Only effective when [canEndConversation] is true.
+     */
+    var footerEndConversationButton: Boolean = false,
     /**
      * If true, a "new chat" button is shown on the conversation view after the conversation
      * has ended. Only effective when [canEndConversation] is true. When the conversation list
@@ -652,6 +677,8 @@ class AgentChatFragment : Fragment() {
         options.showSpeakerLabels?.let { brandMap["showBotName"] = it }
         options.showAvatars?.let { brandMap["showAvatars"] = it }
         options.agentAvatarURL?.let { brandMap["agentAvatarURL"] = it }
+        options.sendButtonSVG?.let { brandMap["sendButtonSVG"] = it }
+        options.sendButtonDisabledSVG?.let { brandMap["sendButtonDisabledSVG"] = it }
         // If locale auto-detect or server-configured chat strings are enabled, remove any messages
         // that are set to their default value so server-configured values or locale defaults can win.
         if (options.shouldOmitDefaultChatStrings()) {
@@ -737,6 +764,12 @@ class AgentChatFragment : Fragment() {
         }
         if (options.canEndConversation) {
             urlBuilder.appendQueryParameter("canEndConversation", "true")
+        }
+        if (options.confirmEndConversation) {
+            urlBuilder.appendQueryParameter("confirmEndConversation", "true")
+        }
+        if (options.footerEndConversationButton) {
+            urlBuilder.appendQueryParameter("footerEndConversationButton", "true")
         }
         if (options.canStartNewChat) {
             urlBuilder.appendQueryParameter("canStartNewChat", "true")
