@@ -88,6 +88,9 @@ public class AgentVoiceChatCoordinator(
         val voiceOptions = options.voiceOptions.copy()
         // data class copy() only carries primary-constructor params; preserve and re-set the
         // @IgnoredOnParcel body properties below.
+        voiceOptions.muteButtonProvider = options.voiceOptions.muteButtonProvider
+        voiceOptions.unmuteButtonProvider = options.voiceOptions.unmuteButtonProvider
+        voiceOptions.endCallButtonProvider = options.voiceOptions.endCallButtonProvider
         voiceOptions.voiceOkHttpClientCustomizer = options.voiceOptions.voiceOkHttpClientCustomizer
         val shouldResumeConversation =
             voiceConversationID != null ||

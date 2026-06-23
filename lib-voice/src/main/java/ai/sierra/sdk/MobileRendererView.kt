@@ -118,16 +118,6 @@ internal class MobileRendererView(
         }
     }
 
-    fun clearConversation() {
-        pendingBatches.clear()
-        if (isReady) {
-            webView.evaluateJavascript(
-                "if (window.sierraMobile?.clearConversation) { window.sierraMobile.clearConversation(); }",
-                null
-            )
-        }
-    }
-
     private fun evaluatePushAttachments(json: String) {
         val escaped = JSONObject.quote(json)
         val js =

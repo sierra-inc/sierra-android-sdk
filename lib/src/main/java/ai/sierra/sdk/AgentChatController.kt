@@ -447,6 +447,16 @@ class AgentChatFragment : Fragment() {
     private var lastUiMode: Int = Configuration.UI_MODE_NIGHT_UNDEFINED
 
     /**
+     * Whether the web content has been revealed (spinner hidden, web view faded in). The reveal
+     * runs only once per load so repeated readiness signals don't re-trigger the animation.
+     */
+    private var didRevealContent: Boolean = false
+
+    /** Handler/runnable for the fallback reveal of a resumed conversation. */
+    private val revealHandler = Handler(Looper.getMainLooper())
+    private var revealFallbackRunnable: Runnable? = null
+
+    /**
      * Callback for file chooser results from the WebView.
      * Used to pass selected file URIs back to the WebView's file input element.
      */
@@ -596,7 +606,14 @@ class AgentChatFragment : Fragment() {
                 }
             }
             addJavascriptInterface(
-                ChatWebViewInterface(requireContext(), storage, listener, this@AgentChatFragment, this),
+                ChatWebViewInterface(
+                    requireContext(),
+                    storage,
+                    listener,
+                    this@AgentChatFragment,
+                    this,
+                    args.options.conversationOptions
+                ),
                 "AndroidSDK"
             )
         }
@@ -746,12 +763,9 @@ class AgentChatFragment : Fragment() {
 
         val locale = conversationOptions.locale ?: resources.configuration.locales[0]
         urlBuilder.appendQueryParameter("locale", locale.toLanguageTag())
-        for ((name, value) in conversationOptions.variables) {
-            urlBuilder.appendQueryParameter("variable", "$name:$value")
-        }
-        for ((name, value) in conversationOptions.secrets) {
-            urlBuilder.appendQueryParameter("secret", "$name:$value")
-        }
+        // Variables and secrets are intentionally not added to the URL. They are delivered to the
+        // web embed via the AndroidSDK.getInitialMemory() bridge method (see ChatWebViewInterface)
+        // so they cannot leak into device, proxy, or analytics logs.
         if (customGreeting != null) {
             urlBuilder.appendQueryParameter("greeting", customGreeting)
         }
@@ -822,8 +836,28 @@ class AgentChatFragment : Fragment() {
         if (!::webView.isInitialized || !::loadingSpinner.isInitialized) {
             return
         }
+        revealFallbackRunnable?.let { revealHandler.removeCallbacks(it) }
+        revealFallbackRunnable = null
+        if (didRevealContent) {
+            return
+        }
+        didRevealContent = true
         loadingSpinner.visibility = View.GONE
         webView.animate().alpha(1f).setDuration(300).start()
+    }
+
+    /**
+     * Keeps the spinner up for a resumed conversation until [showWebContent] is triggered by the
+     * embed's onConversationReady signal. The scheduled fallback guards against older embeds that
+     * never send that signal, so the spinner is not left up indefinitely.
+     */
+    internal fun scheduleRevealFallback() {
+        if (didRevealContent || revealFallbackRunnable != null) {
+            return
+        }
+        val runnable = Runnable { showWebContent() }
+        revealFallbackRunnable = runnable
+        revealHandler.postDelayed(runnable, REVEAL_FALLBACK_MS)
     }
 
     internal fun stopLoadingIndicator() {
@@ -855,6 +889,13 @@ class AgentChatFragment : Fragment() {
         if (storageData != null) {
             outState.putSerializable("storage", HashMap(storageData))
         }
+    }
+
+    override fun onDestroyView() {
+        super.onDestroyView()
+        revealFallbackRunnable?.let { revealHandler.removeCallbacks(it) }
+        revealFallbackRunnable = null
+        didRevealContent = false
     }
 
     fun printTranscript() {
@@ -972,15 +1013,31 @@ private class ChatWebViewInterface(
     private val storage: ConversationStorage?,
     private val listener: ConversationEventListener?,
     private val fragment: AgentChatFragment,
-    private val webView: WebView
+    private val webView: WebView,
+    private val conversationOptions: ConversationOptions?
 ) {
     private val handler = Handler(Looper.getMainLooper())
 
     private fun handleOnOpen(isNewConversation: Boolean) {
         handler.post {
-            fragment.showWebContent()
+            if (isNewConversation) {
+                // New conversation: the greeting is already rendered, so reveal now.
+                fragment.showWebContent()
+            } else {
+                // Resuming an existing conversation: keep the spinner up until the transcript has
+                // rendered (onConversationReady) so we don't flash an empty greeting state. A
+                // fallback guards against older embeds that never send onConversationReady.
+                fragment.scheduleRevealFallback()
+            }
         }
         listener?.onOpen(isNewConversation)
+    }
+
+    @JavascriptInterface
+    fun onConversationReady() {
+        handler.post {
+            fragment.showWebContent()
+        }
     }
 
     @JavascriptInterface
@@ -1115,6 +1172,25 @@ private class ChatWebViewInterface(
         storage?.clear()
     }
 
+    /**
+     * Returns the initial agent memory (variables and secrets) as a JSON string. These are
+     * delivered to the web embed via this bridge method instead of URL query parameters, so the
+     * values cannot leak into device, proxy, or analytics logs.
+     */
+    @JavascriptInterface
+    fun getInitialMemory(): String {
+        val memory = JSONObject()
+        val variables = conversationOptions?.variables
+        if (!variables.isNullOrEmpty()) {
+            memory.put("variables", JSONObject(variables))
+        }
+        val secrets = conversationOptions?.secrets
+        if (!secrets.isNullOrEmpty()) {
+            memory.put("secrets", JSONObject(secrets))
+        }
+        return memory.toString()
+    }
+
     @JavascriptInterface
     fun onSecretExpiry(secretName: String, callbackId: String) {
         listener?.onSecretExpiry(secretName) { result ->
@@ -1161,3 +1237,10 @@ private class ChatWebViewInterface(
 }
 
 private const val TAG = "AgentChatController"
+
+/**
+ * How long to keep the spinner up for a resumed conversation while waiting for
+ * onConversationReady. Only reached when the embed does not send that signal (e.g. an older embed
+ * build); the normal path reveals as soon as the transcript has rendered.
+ */
+private const val REVEAL_FALLBACK_MS = 10_000L

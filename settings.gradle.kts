@@ -18,4 +18,5 @@ dependencyResolutionManagement {
 rootProject.name = "SierraSDK"
 
 include(":lib")
+include(":lib-chatkit")
 include(":lib-voice")

@@ -4,14 +4,21 @@
 package ai.sierra.sdk
 
 import ai.sierra.sdk.voice.R
+import ai.sierra.sdk.chatkit.voice.EndCallButtonLegacy
+import ai.sierra.sdk.chatkit.voice.EndCallButtonPill
+import ai.sierra.sdk.chatkit.voice.MuteButtonLegacy
+import ai.sierra.sdk.chatkit.voice.MuteButtonPill
+import ai.sierra.sdk.chatkit.voice.UnmuteButtonLegacy
+import ai.sierra.sdk.chatkit.voice.UnmuteButtonPill
+import ai.sierra.sdk.chatkit.voice.VoiceMuteLevelDisplaying
 import android.Manifest
 import android.animation.ObjectAnimator
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.content.res.Resources
 import android.graphics.Color
-import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -43,8 +50,9 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
 
-// AgentEvent custom attachment payload consumed by the native voice layer to reset rendered cards.
-private const val CLEAR_CONVERSATION_RENDERER_TYPE = "clear-conversation-renderer"
+private val DEFAULT_MUTE_PILL_BACKGROUND_COLOR: Int = Color.parseColor("#E7E7E7")
+private val DEFAULT_MUTE_PILL_ICON_COLOR: Int = Color.parseColor("#111111")
+private val DEFAULT_END_CALL_PILL_BACKGROUND_COLOR: Int = Color.rgb(242, 75, 39)
 
 public data class AgentAttachment(
     val type: String,
@@ -68,14 +76,6 @@ private fun Map<String, Any?>.toAgentAttachment(): AgentAttachment? {
 private fun List<Map<String, Any?>>.toAgentAttachments(): List<AgentAttachment> =
     mapNotNull { it.toAgentAttachment() }
 
-private fun isClearConversationAttachment(attachment: Map<String, Any?>): Boolean {
-    if (attachment["type"] != "custom") {
-        return false
-    }
-    val data = (attachment["data"] as? Map<*, *>)?.toStringKeyedMap() ?: return false
-    return data["type"] == CLEAR_CONVERSATION_RENDERER_TYPE
-}
-
 private fun Map<*, *>.toStringKeyedMap(): Map<String, Any?>? {
     val map = mutableMapOf<String, Any?>()
     for ((key, value) in this) {
@@ -90,18 +90,19 @@ public data class AgentVoiceStyle(
     val backgroundColor: Int = Color.WHITE,
     val titleBarColor: Int = Color.WHITE,
     val titleBarTextColor: Int = Color.BLACK,
+    /** Legacy control tint retained for compatibility with existing style initializers. */
+    @Deprecated("No longer applied to default controls; pass colors to legacy or pill controls directly.")
     val controlsColor: Int = Color.parseColor("#12304C"),
     val rendererBackgroundColor: Int? = null,
     val muteButtonColor: Int? = null,
     val endConversationButtonColor: Int? = null,
     /**
-     * Tint color applied to the mute button glyph. Defaults to white. Set this to a darker color
-     * when using a white mute background so the glyph remains visible.
+     * Tint color applied to the mute button glyph and label. Defaults to a dark color for the
+     * light default mute pill.
      */
-    val muteButtonIconColor: Int = Color.WHITE,
+    val muteButtonIconColor: Int = DEFAULT_MUTE_PILL_ICON_COLOR,
     /**
-     * Tint color applied to the end conversation button glyph. Defaults to white. Set this to a
-     * darker color when using a white end background so the glyph remains visible.
+     * Tint color applied to the end conversation button glyph and label.
      */
     val endConversationButtonIconColor: Int = Color.WHITE,
     val conversationDisclosureTextColor: Int = Color.GRAY,
@@ -109,7 +110,11 @@ public data class AgentVoiceStyle(
     @FontRes val conversationDisclosureFontResId: Int? = null,
     /** Font size for the disclosure shown below the controls, in sp. */
     val conversationDisclosureTextSizeSp: Float = 12f
-) : Parcelable
+) : Parcelable {
+    @IgnoredOnParcel
+    @Suppress("DEPRECATION")
+    internal val legacyControlsColor: Int = controlsColor
+}
 
 @Parcelize
 public data class AgentVoiceControllerOptions(
@@ -145,7 +150,17 @@ public data class AgentVoiceControllerOptions(
      * statically, without the speaking-state pulse animation applied to the default waveform.
      */
     @DrawableRes
-    var voiceWaveformIconResId: Int? = null
+    var voiceWaveformIconResId: Int? = null,
+    /**
+     * Optional spacing override for the native mute/end controls row, in dp. Set this when
+     * providing custom controls that need spacing different from the SDK defaults.
+     */
+    var controlsSpacingDp: Int? = null,
+    /**
+     * Optional equal-width override for the native mute/end controls row. Set this when providing
+     * custom controls that should not use the SDK's pill or legacy layout defaults.
+     */
+    var controlsUseEqualWidths: Boolean? = null
 ) : Parcelable {
     @Deprecated("Use voiceAgentParameters instead.")
     @IgnoredOnParcel
@@ -154,6 +169,18 @@ public data class AgentVoiceControllerOptions(
         set(value) {
             voiceAgentParameters = value
         }
+
+    /** Optional factory for the native mute button component. Called for each voice fragment view. */
+    @IgnoredOnParcel
+    public var muteButtonProvider: ((Context) -> View)? = null
+
+    /** Optional factory for the native unmute button component. Called for each voice fragment view. */
+    @IgnoredOnParcel
+    public var unmuteButtonProvider: ((Context) -> View)? = null
+
+    /** Optional factory for the native end-call button component. Called for each voice fragment view. */
+    @IgnoredOnParcel
+    public var endCallButtonProvider: ((Context) -> View)? = null
 
     /**
      * Optional customizer applied to the OkHttpClient builder that backs the voice WebSocket
@@ -198,6 +225,45 @@ public data class AgentVoiceControllerOptions(
     internal var endRoutesToChat: Boolean = false
 }
 
+public fun AgentVoiceControllerOptions.useLegacyVoiceControls(
+    context: Context,
+    backgroundColor: Int? = null,
+    iconColor: Int? = null
+) {
+    val muteBackground = backgroundColor
+        ?: voiceStyle.muteButtonColor
+        ?: voiceControlsColorFallback(voiceStyle.legacyControlsColor)
+    val endCallBackground = backgroundColor
+        ?: voiceStyle.endConversationButtonColor
+        ?: voiceControlsColorFallback(voiceStyle.legacyControlsColor)
+    val muteIconColor = iconColor ?: Color.WHITE
+    val endCallIconColor = iconColor ?: voiceStyle.endConversationButtonIconColor
+    muteButtonProvider = { viewContext ->
+        MuteButtonLegacy(
+            context = viewContext,
+            backgroundColor = muteBackground,
+            iconColor = muteIconColor,
+            muteIconResId = muteIconResId
+        )
+    }
+    unmuteButtonProvider = { viewContext ->
+        UnmuteButtonLegacy(
+            context = viewContext,
+            backgroundColor = muteBackground,
+            iconColor = muteIconColor,
+            unmuteIconResId = mutedIconResId
+        )
+    }
+    endCallButtonProvider = { viewContext ->
+        EndCallButtonLegacy(
+            context = viewContext,
+            backgroundColor = endCallBackground,
+            iconColor = endCallIconColor,
+            iconResId = endConversationIconResId
+        )
+    }
+}
+
 public class AgentVoiceController(
     internal val agent: Agent,
     internal val options: AgentVoiceControllerOptions = AgentVoiceControllerOptions(name = "Voice Agent")
@@ -218,6 +284,7 @@ public class AgentVoiceController(
             connectedFragment?.setDisableInterruptions(value)
         }
 
+    @Suppress("DEPRECATION")
     public constructor(agent: Agent, options: AgentChatControllerOptions) : this(
         agent = agent,
         options = AgentVoiceControllerOptions(
@@ -283,13 +350,14 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
     private lateinit var placeholderLabel: TextView
     private lateinit var loadingIndicator: ProgressBar
     private lateinit var errorBanner: TextView
-    private lateinit var muteButton: ImageView
-    private lateinit var endButton: ImageView
+    private var muteButton: View? = null
+    private var unmuteButton: View? = null
+    private var endButton: View? = null
+    private var muteLevelDisplay: VoiceMuteLevelDisplaying? = null
     private lateinit var disclosureLabel: TextView
     private var switchToChatMenuItem: MenuItem? = null
-    private val controlButtonSizeDp = 64
-    private val controlIconMaxSizeDp = 32
     private val controlButtonSpacingDp = 28
+    private val controlPillSpacingDp = 10
     private val controlsTopPaddingDp = 16
     private val controlsBottomPaddingDp = 18
     private val controlsBottomPaddingWithDisclosureDp = 4
@@ -309,6 +377,8 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
     private var rendererFailed = false
     private var lastRenderableAttachmentsSignature: String? = null
     private var isMuted = false
+    private var latestInputAudioLevel = 0f
+    private var latestOutputAudioLevel = 0f
     private var isDisableInterruptions = false
     private val mainHandler = Handler(Looper.getMainLooper())
     private var initialGreetingFallbackRunnable: Runnable? = null
@@ -377,7 +447,11 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
 
     override fun onResume() {
         super.onResume()
-        voiceSession?.resumeListening()
+        if (isMuted) {
+            voiceSession?.pauseListening()
+        } else {
+            voiceSession?.resumeListening()
+        }
     }
 
     override fun onDestroyView() {
@@ -413,6 +487,11 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         val agentParameters = options.voiceAgentParameters ?: hashMapOf()
         hasShutdownVoiceSession = false
         voiceExitState = VoiceExitState.NONE
+        isMuted = false
+        latestInputAudioLevel = 0f
+        latestOutputAudioLevel = 0f
+        muteLevelDisplay?.resetLevels()
+        updateMuteControl(isMuted = false)
         VoiceSessionService.start(requireContext())
         val session = VoiceSessionManager(
             config = agentConfig,
@@ -578,20 +657,15 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
         }
-        muteButton = createCircleButton(
-            iconRes = options.muteIconResId ?: R.drawable.sierra_ic_mic_24,
-            backgroundColor = options.voiceStyle.muteButtonColor ?: resolvedControlsColor(),
-            iconColor = options.voiceStyle.muteButtonIconColor
-        ).apply {
-            contentDescription = "Mute microphone"
-        }
-        endButton = createCircleButton(
-            iconRes = options.endConversationIconResId ?: R.drawable.sierra_ic_close_24,
-            backgroundColor = options.voiceStyle.endConversationButtonColor ?: resolvedControlsColor(),
-            iconColor = options.voiceStyle.endConversationButtonIconColor
-        ).apply {
-            contentDescription = "Close conversation"
-        }
+        val controlsContext = requireContext()
+        val mute = options.muteButtonProvider?.invoke(controlsContext) ?: defaultMuteButton()
+        val unmute = options.unmuteButtonProvider?.invoke(controlsContext) ?: defaultUnmuteButton()
+        val end = options.endCallButtonProvider?.invoke(controlsContext) ?: defaultEndCallButton()
+        muteButton = mute
+        unmuteButton = unmute
+        endButton = end
+        muteLevelDisplay = mute as? VoiceMuteLevelDisplaying
+
         disclosureLabel = TextView(requireContext()).apply {
             text = options.disclosureText.orEmpty()
             setTextColor(options.voiceStyle.conversationDisclosureTextColor)
@@ -604,19 +678,29 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
             setPadding(24.dp, 18.dp, 24.dp, 0)
         }
 
-        muteButton.setOnClickListener { muteTapped() }
-        endButton.setOnClickListener { handleEndTapped() }
+        mute.setOnClickListener { muteTapped() }
+        unmute.setOnClickListener { muteTapped() }
+        end.setOnClickListener { handleEndTapped() }
 
+        val muteToggleContainer = createMuteToggleContainer(mute, unmute)
+        val usesLegacyControls = usesLegacyControls(mute, unmute, end)
+        val useEqualWidths = options.controlsUseEqualWidths ?: false
+        if (useEqualWidths) {
+            buttonsContainer.layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+        val controlsSpacing = (options.controlsSpacingDp ?: if (usesLegacyControls) controlButtonSpacingDp else controlPillSpacingDp).dp
         buttonsContainer.addView(
-            muteButton,
-            LinearLayout.LayoutParams(controlButtonSizeDp.dp, controlButtonSizeDp.dp).apply {
-                marginEnd = controlButtonSpacingDp.dp
-            }
+            muteToggleContainer,
+            controlLayoutParams(muteToggleContainer, useEqualWidths).apply { marginEnd = controlsSpacing }
         )
         buttonsContainer.addView(
-            endButton,
-            LinearLayout.LayoutParams(controlButtonSizeDp.dp, controlButtonSizeDp.dp)
+            end,
+            controlLayoutParams(end, useEqualWidths)
         )
+        updateMuteControl(isMuted = false)
         container.addView(buttonsContainer)
         container.addView(
             disclosureLabel,
@@ -628,27 +712,94 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         return container
     }
 
-    private fun createCircleButton(iconRes: Int, backgroundColor: Int, iconColor: Int): ImageView {
-        val bg = GradientDrawable()
-        bg.shape = GradientDrawable.OVAL
-        bg.setColor(backgroundColor.takeIf { Color.alpha(it) != 0 } ?: Color.parseColor("#12304C"))
-        return ImageView(requireContext()).apply {
-            setImageResource(iconRes)
-            setColorFilter(iconColor)
-            val iconInset = ((controlButtonSizeDp - controlIconMaxSizeDp) / 2).dp
-            setPadding(iconInset, iconInset, iconInset, iconInset)
-            background = bg
-            scaleType = ImageView.ScaleType.FIT_CENTER
-            isClickable = true
-            isFocusable = true
-            contentDescription = ""
+    private fun defaultMuteButton(): View {
+        val backgroundColor = options.voiceStyle.muteButtonColor ?: DEFAULT_MUTE_PILL_BACKGROUND_COLOR
+        return MuteButtonPill(
+            context = requireContext(),
+            backgroundColor = backgroundColor,
+            iconColor = defaultMuteButtonIconColor(backgroundColor),
+            muteIconResId = options.muteIconResId
+        )
+    }
+
+    private fun defaultUnmuteButton(): View {
+        val backgroundColor = options.voiceStyle.muteButtonColor ?: DEFAULT_MUTE_PILL_BACKGROUND_COLOR
+        return UnmuteButtonPill(
+            context = requireContext(),
+            backgroundColor = backgroundColor,
+            unmuteIconResId = options.mutedIconResId
+        )
+    }
+
+    private fun defaultEndCallButton(): View {
+        return EndCallButtonPill(
+            context = requireContext(),
+            backgroundColor = options.voiceStyle.endConversationButtonColor ?: DEFAULT_END_CALL_PILL_BACKGROUND_COLOR,
+            iconColor = options.voiceStyle.endConversationButtonIconColor,
+            iconResId = options.endConversationIconResId
+        )
+    }
+
+    private fun defaultMuteButtonIconColor(backgroundColor: Int): Int {
+        val configuredIconColor = options.voiceStyle.muteButtonIconColor
+        return if (
+            options.voiceStyle.muteButtonColor != null &&
+            configuredIconColor == DEFAULT_MUTE_PILL_ICON_COLOR
+        ) {
+            contrastingBlackOrWhite(backgroundColor)
+        } else {
+            configuredIconColor
         }
     }
 
-    private fun resolvedControlsColor(): Int {
-        return options.voiceStyle.controlsColor
-            .takeIf { Color.alpha(it) != 0 }
-            ?: Color.parseColor("#12304C")
+    private fun usesLegacyControls(mute: View, unmute: View, end: View): Boolean =
+        mute is MuteButtonLegacy || unmute is UnmuteButtonLegacy || end is EndCallButtonLegacy
+
+    private fun createMuteToggleContainer(mute: View, unmute: View): FrameLayout {
+        return FrameLayout(requireContext()).apply {
+            val width = maxPositiveLayoutDimension(mute, unmute) { it.width }
+            val height = maxPositiveLayoutDimension(mute, unmute) { it.height }
+            if (width != null && height != null) {
+                layoutParams = LinearLayout.LayoutParams(width, height)
+            }
+            for (button in listOf(mute, unmute)) {
+                addView(button, FrameLayout.LayoutParams(
+                    width ?: ViewGroup.LayoutParams.WRAP_CONTENT,
+                    height ?: ViewGroup.LayoutParams.WRAP_CONTENT
+                ))
+            }
+        }
+    }
+
+    private fun maxPositiveLayoutDimension(
+        first: View,
+        second: View,
+        getDimension: (ViewGroup.LayoutParams) -> Int
+    ): Int? {
+        return listOfNotNull(first.layoutParams, second.layoutParams)
+            .map(getDimension)
+            .filter { it > 0 }
+            .maxOrNull()
+    }
+
+    private fun controlLayoutParams(view: View, useEqualWidths: Boolean): LinearLayout.LayoutParams {
+        if (useEqualWidths) {
+            return LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val width = view.layoutParams?.width?.takeIf { it > 0 } ?: ViewGroup.LayoutParams.WRAP_CONTENT
+        val height = view.layoutParams?.height?.takeIf { it > 0 } ?: ViewGroup.LayoutParams.WRAP_CONTENT
+        return LinearLayout.LayoutParams(width, height)
+    }
+
+    private fun updateMuteControl(isMuted: Boolean) {
+        muteButton?.visibility = if (isMuted) View.GONE else View.VISIBLE
+        unmuteButton?.visibility = if (isMuted) View.VISIBLE else View.GONE
+        if (isMuted) {
+            muteLevelDisplay?.resetLevels()
+        } else {
+            muteLevelDisplay?.setInputLevel(latestInputAudioLevel)
+            muteLevelDisplay?.setOutputLevel(latestOutputAudioLevel)
+        }
     }
 
     private fun ensureRendererLoaded() {
@@ -762,7 +913,10 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
             VoiceSessionManager.State.ENDED -> {
                 showLoadingState(false)
                 cancelInitialGreetingFallback()
+                latestInputAudioLevel = 0f
+                latestOutputAudioLevel = 0f
                 stopWaveformAnimation()
+                muteLevelDisplay?.resetLevels()
                 setControlButtonsEnabled(false)
             }
         }
@@ -770,16 +924,19 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
 
     private fun setControlButtonsEnabled(enabled: Boolean) {
         val alpha = if (enabled) 1f else 0.5f
-        muteButton.isEnabled = enabled
-        muteButton.alpha = alpha
-        endButton.isEnabled = enabled
-        endButton.alpha = alpha
+        for (button in listOfNotNull(muteButton, unmuteButton, endButton)) {
+            button.isEnabled = enabled
+            button.alpha = alpha
+        }
         switchToChatMenuItem?.isEnabled = enabled
         switchToChatMenuItem?.icon?.alpha = if (enabled) 255 else 128
     }
 
     private fun showErrorState(message: String) {
+        latestInputAudioLevel = 0f
+        latestOutputAudioLevel = 0f
         stopWaveformAnimation()
+        muteLevelDisplay?.resetLevels()
         shutdownVoiceSessionIfNeeded()
         errorBanner.text = message
         errorBanner.visibility = View.VISIBLE
@@ -800,11 +957,12 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         isMuted = !isMuted
         if (isMuted) {
             voiceSession?.pauseListening()
-            muteButton.setImageResource(options.mutedIconResId ?: R.drawable.sierra_ic_mic_off_24)
+            latestInputAudioLevel = 0f
+            muteLevelDisplay?.setInputLevel(0f)
         } else {
             voiceSession?.resumeListening()
-            muteButton.setImageResource(options.muteIconResId ?: R.drawable.sierra_ic_mic_24)
         }
+        updateMuteControl(isMuted)
     }
 
     private fun switchToChatTapped() {
@@ -853,6 +1011,19 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         markInitialGreetingReceivedIfNeeded()
     }
 
+    override fun onUpdateInputAudioLevel(level: Float) {
+        if (isMuted) {
+            return
+        }
+        latestInputAudioLevel = level
+        muteLevelDisplay?.setInputLevel(level)
+    }
+
+    override fun onUpdateOutputAudioLevel(level: Float) {
+        latestOutputAudioLevel = level
+        muteLevelDisplay?.setOutputLevel(level)
+    }
+
     override fun onReceiveAttachments(attachments: List<Map<String, Any?>>) {
         val (secretRefreshAttachments, renderableAttachments) = attachments.partition {
             SecretRefreshOrchestrator.isSecretRefreshAttachment(it)
@@ -871,25 +1042,13 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
             return
         }
 
-        val shouldClearAttachments = renderableAttachments.any(::isClearConversationAttachment)
-        val attachmentsToRender = renderableAttachments.filterNot(::isClearConversationAttachment)
-
-        if (shouldClearAttachments) {
-            lastRenderableAttachmentsSignature = null
-            clearConversation()
-        }
-
-        if (attachmentsToRender.isEmpty()) {
-            return
-        }
-
-        val signature = canonicalizeForSignature(attachmentsToRender)
+        val signature = canonicalizeForSignature(renderableAttachments)
         if (signature == lastRenderableAttachmentsSignature) {
             return
         }
         lastRenderableAttachmentsSignature = signature
 
-        val agentAttachments = attachmentsToRender.toAgentAttachments()
+        val agentAttachments = renderableAttachments.toAgentAttachments()
 
         if (agentAttachments.isNotEmpty()) {
             voiceCallbacks?.onAgentAttachment(agentAttachments)
@@ -907,11 +1066,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
             placeholderContainer.visibility = View.GONE
             rendererView?.visibility = View.VISIBLE
         }
-        rendererView?.pushAttachments(attachmentsToRender)
-    }
-
-    private fun clearConversation() {
-        rendererView?.clearConversation()
+        rendererView?.pushAttachments(renderableAttachments)
     }
 
     override fun onChangeState(state: VoiceSessionManager.State) {
@@ -1049,6 +1204,30 @@ private fun Fragment.resolvePlaceholderTextColor(): Int {
     } else {
         Color.argb(alpha, 17, 17, 17)
     }
+}
+
+private fun voiceControlsColorFallback(color: Int): Int =
+    color.takeIf { Color.alpha(it) != 0 } ?: Color.parseColor("#12304C")
+
+private fun contrastingBlackOrWhite(color: Int): Int {
+    val luminance = relativeLuminance(color)
+    val whiteContrast = (1.0 + 0.05) / (luminance + 0.05)
+    val blackContrast = (luminance + 0.05) / 0.05
+    return if (whiteContrast > blackContrast) Color.WHITE else DEFAULT_MUTE_PILL_ICON_COLOR
+}
+
+private fun relativeLuminance(color: Int): Double {
+    fun linearized(component: Int): Double {
+        val value = component / 255.0
+        return if (value <= 0.03928) {
+            value / 12.92
+        } else {
+            Math.pow((value + 0.055) / 1.055, 2.4)
+        }
+    }
+    return 0.2126 * linearized(Color.red(color)) +
+        0.7152 * linearized(Color.green(color)) +
+        0.0722 * linearized(Color.blue(color))
 }
 
 private val Int.dp: Int

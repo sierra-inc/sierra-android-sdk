@@ -45,6 +45,8 @@ internal interface VoiceSessionDelegate {
     fun onEnd()
     fun onContinueInChat() {}
     fun onReceiveResumeToken(token: String) {}
+    fun onUpdateInputAudioLevel(level: Float) {}
+    fun onUpdateOutputAudioLevel(level: Float) {}
 }
 
 public enum class AgentVoiceCloseReason(public val rawValue: String) {
@@ -129,6 +131,8 @@ internal class VoiceSessionManager(
     private var playbackThread: Thread? = null
     private val playbackQueue = LinkedBlockingQueue<QueuedAudioBuffer>()
     @Volatile private var isPlaying = false
+    @Volatile private var lastDispatchedInputAudioLevel = 0f
+    @Volatile private var lastDispatchedOutputAudioLevel = 0f
 
     private var acousticEchoCanceler: AcousticEchoCanceler? = null
     private var noiseSuppressor: NoiseSuppressor? = null
@@ -263,6 +267,8 @@ internal class VoiceSessionManager(
         isSystemListeningPaused = false
         isSpeakingMuted = false
         resetSpeakingGateState()
+        dispatchInputAudioLevel(0f)
+        dispatchOutputAudioLevel(0f)
         stopAudio()
         if (sendCloseMessage) {
             sendClose(rawReason)
@@ -274,6 +280,7 @@ internal class VoiceSessionManager(
 
     fun pauseListening() {
         isUserListeningPaused = true
+        dispatchInputAudioLevel(0f)
     }
 
     fun resumeListening() {
@@ -387,6 +394,22 @@ internal class VoiceSessionManager(
 
     private fun sendJSON(payload: JSONObject) {
         webSocket?.send(payload.toString())
+    }
+
+    private fun dispatchInputAudioLevel(level: Float) {
+        if (level == 0f && lastDispatchedInputAudioLevel == 0f) {
+            return
+        }
+        lastDispatchedInputAudioLevel = level
+        mainHandler.post { delegate.onUpdateInputAudioLevel(level) }
+    }
+
+    private fun dispatchOutputAudioLevel(level: Float) {
+        if (level == 0f && lastDispatchedOutputAudioLevel == 0f) {
+            return
+        }
+        lastDispatchedOutputAudioLevel = level
+        mainHandler.post { delegate.onUpdateOutputAudioLevel(level) }
     }
 
     private fun nextMsgNum(): Int {
@@ -608,6 +631,7 @@ internal class VoiceSessionManager(
             while (isSessionRunning) {
                 val record = audioRecord ?: break
                 if (isUserListeningPaused || isSystemListeningPaused || isSpeakingMuted) {
+                    dispatchInputAudioLevel(0f)
                     Thread.sleep(10)
                     continue
                 }
@@ -622,14 +646,16 @@ internal class VoiceSessionManager(
                     wasSpeakingState = isSpeakingState
                 }
 
+                val rms = computeRms16(buffer, read)
                 if (isSpeakingState && !disableInterruptions) {
-                    val rms = computeRms16(buffer, read)
                     if (!shouldPassSpeakingGate(rms)) {
+                        dispatchInputAudioLevel(0f)
                         continue
                     }
                 } else {
                     resetSpeakingGateState()
                 }
+                dispatchInputAudioLevel(rms)
                 sendAudioClient(buffer.copyOf(read))
             }
         }
@@ -650,12 +676,14 @@ internal class VoiceSessionManager(
                         state = State.SPEAKING
                     }
                 }
+                dispatchOutputAudioLevel(computeRms16(queued.data, queued.data.size))
                 track.write(queued.data, 0, queued.data.size)
                 if (!queued.mark.isNullOrEmpty()) {
                     sendPlaybackProgress(queued.mark)
                 }
                 if (playbackQueue.isEmpty()) {
                     isPlaying = false
+                    dispatchOutputAudioLevel(0f)
                     mainHandler.post {
                         if (state == State.SPEAKING) {
                             state = State.LISTENING
@@ -680,6 +708,7 @@ internal class VoiceSessionManager(
     private fun clearAudioQueue() {
         playbackQueue.clear()
         isPlaying = false
+        dispatchOutputAudioLevel(0f)
         mainHandler.post {
             try {
                 audioTrack?.pause()
@@ -731,6 +760,8 @@ internal class VoiceSessionManager(
         audioTrack = null
         playbackQueue.clear()
         isPlaying = false
+        lastDispatchedInputAudioLevel = 0f
+        lastDispatchedOutputAudioLevel = 0f
         resetSpeakingGateState()
         audioFocusRequest?.let { request ->
             audioManager?.abandonAudioFocusRequest(request)
