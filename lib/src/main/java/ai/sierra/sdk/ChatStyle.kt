@@ -41,7 +41,19 @@ data class ChatStyleTypography(
     val fontFamily: String? = null,
 
     /** The font size, in pixels. */
-    val fontSize: Int? = null
+    val fontSize: Int? = null,
+
+    /** Typography overrides for chat bubbles from the user. */
+    val userBubble: ChatTextStyle? = null,
+
+    /** Typography overrides for chat bubbles from the AI assistant. */
+    val assistantBubble: ChatTextStyle? = null,
+
+    /** Typography overrides for the title bar text. */
+    val titleBar: ChatTextStyle? = null,
+
+    /** Typography overrides for the disclosure (disclaimer) text. */
+    val disclosure: ChatTextStyle? = null,
 ) : Parcelable {
     internal fun toJSON(): Map<String, Any?> {
         val typography = mutableMapOf<String, Any?>()
@@ -53,7 +65,83 @@ data class ChatStyleTypography(
             typography["fontSize750"] = it
             typography["fontSize500"] = it
         }
+        userBubble?.let { typography["userBubble"] = it.toJSON() }
+        assistantBubble?.let { typography["assistantBubble"] = it.toJSON() }
+        titleBar?.let { typography["titleBar"] = it.toJSON() }
+        disclosure?.let { typography["disclosure"] = it.toJSON() }
         return typography
+    }
+}
+
+/**
+ * Styling overrides for hyperlinks within a region's text (e.g. links in the
+ * disclosure or in chat bubbles).
+ */
+@Parcelize
+data class ChatLinkStyle(
+    /** The font weight (or boldness) of hyperlinks. */
+    val fontWeight: Int? = null,
+
+    /** The font style of hyperlinks: "normal" or "italic". */
+    val fontStyle: String? = null,
+
+    /**
+     * Underline behavior for hyperlinks: "always", "hover", or "none". "hover"
+     * (the default) underlines on hover only; on touch devices this effectively
+     * means no underline at rest.
+     */
+    val underline: String? = null,
+) : Parcelable {
+    internal fun toJSON(): Map<String, Any?> {
+        val json = mutableMapOf<String, Any?>()
+        fontWeight?.let { json["fontWeight"] = it }
+        fontStyle?.let { json["fontStyle"] = it }
+        underline?.let { json["underline"] = it }
+        return json
+    }
+}
+
+/**
+ * Typography overrides for a specific region of the chat UI (e.g. user bubbles,
+ * agent bubbles, the title bar, or the disclosure text).
+ */
+@Parcelize
+data class ChatTextStyle(
+    /** The font size, in pixels. */
+    val fontSize: Int? = null,
+
+    /** The font weight, or boldness. */
+    val fontWeight: Int? = null,
+
+    /** The line height, as a unitless multiplier of the font size. */
+    val lineHeight: Double? = null,
+
+    /** The horizontal spacing between text characters, in em units. */
+    val letterSpacing: Double? = null,
+
+    /**
+     * The font family, a comma-separated list of font names. Overrides the
+     * global `fontFamily` for this region.
+     * Note: Only built-in system fonts are supported.
+     */
+    val fontFamily: String? = null,
+
+    /** The font style: "normal" or "italic". */
+    val fontStyle: String? = null,
+
+    /** Styling overrides for hyperlinks within this region's text. */
+    val link: ChatLinkStyle? = null,
+) : Parcelable {
+    internal fun toJSON(): Map<String, Any?> {
+        val json = mutableMapOf<String, Any?>()
+        fontSize?.let { json["fontSize"] = it }
+        fontWeight?.let { json["fontWeight"] = it }
+        lineHeight?.let { json["lineHeight"] = it }
+        letterSpacing?.let { json["letterSpacing"] = it }
+        fontFamily?.let { json["fontFamily"] = it }
+        fontStyle?.let { json["fontStyle"] = it }
+        link?.let { json["link"] = it.toJSON() }
+        return json
     }
 }
 
@@ -90,8 +178,26 @@ data class ChatStyleColors(
     /** The color of the text in chat bubbles for messages from the user. */
     @ColorInt val userBubbleText: Int? = null,
 
-    /** The color of the "Start new chat" button text. */
+    /**
+     * The color of the new-chat button. When the button appears as a flat button in the chat
+     * footer, this controls the text color. When the button appears as a filled button in the
+     * conversation list, this controls the background color; in that case `newChatButtonText`
+     * controls the text color. When null, falls back to `userBubble`.
+     */
     @ColorInt val newChatButton: Int? = null,
+
+    /**
+     * The text color of the new-chat button in the conversation list. When null, falls back to
+     * `userBubbleText`.
+     */
+    @ColorInt val newChatButtonText: Int? = null,
+
+    /**
+     * The color of the placeholder text shown in the message input, also used for the send button
+     * arrow when the input is empty. When null, falls back to `text` at reduced opacity; when set,
+     * it is used at full opacity.
+     */
+    @ColorInt val inputPlaceholder: Int? = null,
 
     /**
      * The color of the file upload (attachment) button icon in the chat input. When null,
@@ -99,6 +205,18 @@ data class ChatStyleColors(
      * `background` in light or dark mode.
      */
     @ColorInt val uploadButtonIcon: Int? = null,
+
+    /** The color of the disclosure (disclaimer) text. When null, the default disclosure text color is used. */
+    @ColorInt val disclosure: Int? = null,
+
+    /** The color of links within the disclosure (disclaimer) text. */
+    @ColorInt val disclosureLink: Int? = null,
+
+    /** The color of links in chat bubbles for messages from the user. */
+    @ColorInt val userBubbleLink: Int? = null,
+
+    /** The color of links in chat bubbles for messages from the AI assistant. */
+    @ColorInt val assistantBubbleLink: Int? = null,
 ) : Parcelable {
     internal fun toJSON(): Map<String, String> {
         // Match the web embed's ChatStyle.colors shape.
@@ -113,7 +231,13 @@ data class ChatStyleColors(
             "userBubble" to userBubble,
             "userBubbleText" to userBubbleText,
             "newChatButton" to newChatButton,
+            "newChatButtonText" to newChatButtonText,
+            "inputPlaceholder" to inputPlaceholder,
             "uploadButtonIcon" to uploadButtonIcon,
+            "disclosure" to disclosure,
+            "disclosureLink" to disclosureLink,
+            "userBubbleLink" to userBubbleLink,
+            "assistantBubbleLink" to assistantBubbleLink,
         )
         return colors.filterValues { it != null }
             .mapValues { String.format("#%06X", it.value!! and 0xFFFFFF) }

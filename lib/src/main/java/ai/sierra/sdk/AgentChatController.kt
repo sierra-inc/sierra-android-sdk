@@ -198,6 +198,15 @@ data class AgentChatControllerOptions(
     /** Whether to show the conversation list by default when the chat opens. */
     val showConversationListByDefault: Boolean = false,
 
+    /**
+     * When true, the variables and secrets supplied via [conversationOptions] are re-sent when an
+     * existing conversation is resumed (e.g. when the controller is recreated with new values), so
+     * the resumed conversation picks them up. Values are merged per key (later values win); keys not
+     * supplied are left unchanged. When false (the default), variables and secrets are only applied
+     * when the conversation is first created.
+     */
+    val updateVariablesAndSecretsOnSessionResume: Boolean = false,
+
     /** Customization of the Conversation that the controller will create. */
     var conversationOptions: ConversationOptions? = null,
 
@@ -826,6 +835,9 @@ class AgentChatFragment : Fragment() {
         }
         if (options.showConversationListByDefault) {
             urlBuilder.appendQueryParameter("showConversationListByDefault", "true")
+        }
+        if (options.updateVariablesAndSecretsOnSessionResume) {
+            urlBuilder.appendQueryParameter("updateVariablesAndSecretsOnSessionResume", "true")
         }
 
         val url = urlBuilder.build().toString()
