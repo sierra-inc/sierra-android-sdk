@@ -15,11 +15,12 @@ public class UnmuteButtonPill @JvmOverloads constructor(
     context: Context,
     @ColorInt backgroundColor: Int,
     @DrawableRes unmuteIconResId: Int? = null,
-    title: String = "Unmute",
+    title: String = "Mute",
+    layout: VoiceControlButtonLayout = VoiceControlButtonLayout.PILL,
     attrs: AttributeSet? = null,
 ) : LinearLayout(context, attrs) {
     init {
-        configurePillButton(backgroundColor = backgroundColor, contentDescriptionText = title)
+        configurePillButton(backgroundColor = backgroundColor, contentDescriptionText = title, layout = layout)
         orientation = HORIZONTAL
         gravity = Gravity.CENTER
 
@@ -36,6 +37,8 @@ public class UnmuteButtonPill @JvmOverloads constructor(
             )
         }
         addView(iconContainer)
-        addView(controlLabel(context, title, UNMUTE_COLOR))
+        if (layout == VoiceControlButtonLayout.PILL) {
+            addView(controlLabel(context, title, UNMUTE_COLOR))
+        }
     }
 }

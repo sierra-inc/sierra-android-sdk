@@ -38,6 +38,7 @@ import kotlin.math.sqrt
 internal interface VoiceSessionDelegate {
     fun onReceiveCredentials(conversationID: String, encryptionKey: String?)
     fun onReceiveAttachments(attachments: List<Map<String, Any?>>)
+    fun onReceiveConversationEvent(event: AgentVoiceConversationEvent) {}
     fun onReceiveInitialAudio() {}
     fun onStartInitialAudioPlayback() {}
     fun onChangeState(state: VoiceSessionManager.State)
@@ -47,6 +48,35 @@ internal interface VoiceSessionDelegate {
     fun onReceiveResumeToken(token: String) {}
     fun onUpdateInputAudioLevel(level: Float) {}
     fun onUpdateOutputAudioLevel(level: Float) {}
+}
+
+public data class AgentVoiceConversationEvent(
+    val messageId: String,
+    val eventType: String,
+    val role: String,
+    val text: String = "",
+    val attachments: List<Map<String, Any?>> = emptyList()
+)
+
+private fun JSONObject.toAgentVoiceConversationEvent(): AgentVoiceConversationEvent? {
+    val messageId = optString("messageId").takeIf { it.isNotEmpty() } ?: return null
+    val eventType = optString("eventType").takeIf { it.isNotEmpty() } ?: return null
+    val role = optString("role").takeIf { it.isNotEmpty() } ?: return null
+    val attachments = mutableListOf<Map<String, Any?>>()
+    val arr = optJSONArray("attachments")
+    if (arr != null) {
+        for (i in 0 until arr.length()) {
+            val obj = arr.optJSONObject(i) ?: continue
+            attachments.add(jsonObjectToMap(obj))
+        }
+    }
+    return AgentVoiceConversationEvent(
+        messageId = messageId,
+        eventType = eventType,
+        role = role,
+        text = optString("text", ""),
+        attachments = attachments
+    )
 }
 
 public enum class AgentVoiceCloseReason(public val rawValue: String) {
@@ -78,6 +108,7 @@ internal class VoiceSessionManager(
     customizeOkHttpClient: ((OkHttpClient.Builder) -> Unit)? = null,
     private val enableText: Boolean = true,
     private val forwardAgentAttachments: Boolean = true,
+    private val enableConversationEvents: Boolean = false,
     private val delegate: VoiceSessionDelegate
 ) : SecretRefreshVoiceSession {
     private val conversationId: String = conversationId ?: UUID.randomUUID().toString()
@@ -139,7 +170,7 @@ internal class VoiceSessionManager(
     private var automaticGainControl: AutomaticGainControl? = null
 
     private val sampleRate = 24000
-    private val compatibilityDate = "2026-04-29"
+    private val compatibilityDate = "2026-05-07"
 
     // Adaptive speaking gate state (mirrors iOS behavior).
     // Accessed from the record thread.
@@ -291,8 +322,8 @@ internal class VoiceSessionManager(
         clearAudioQueue()
     }
 
-    fun sendTextClient(text: String) {
-        sendJSON(
+    fun sendTextClient(text: String): Boolean {
+        return sendJSON(
             JSONObject()
                 .put("type", "text_client")
                 .put("msgNum", nextMsgNum())
@@ -343,6 +374,7 @@ internal class VoiceSessionManager(
             .put("locale", localeTag)
             .put("enableText", enableText)
             .put("forwardAgentAttachments", forwardAgentAttachments)
+            .put("enableConversationEvents", enableConversationEvents)
             .put("enableSessionInfo", true)
         if (resumeConversation) {
             subMsg.put("resumeConversation", true)
@@ -392,8 +424,8 @@ internal class VoiceSessionManager(
         )
     }
 
-    private fun sendJSON(payload: JSONObject) {
-        webSocket?.send(payload.toString())
+    private fun sendJSON(payload: JSONObject): Boolean {
+        return webSocket?.send(payload.toString()) == true
     }
 
     private fun dispatchInputAudioLevel(level: Float) {
@@ -474,6 +506,17 @@ internal class VoiceSessionManager(
                     }
                 }
                 mainHandler.post { delegate.onReceiveAttachments(attachments) }
+            }
+            "conversation_event_server" -> {
+                if (!enableConversationEvents) {
+                    return
+                }
+                val event = subMsg.toAgentVoiceConversationEvent()
+                if (event == null) {
+                    Log.w(VOICE_TAG, "SVP conversation_event_server received but could not parse subMsg")
+                    return
+                }
+                mainHandler.post { delegate.onReceiveConversationEvent(event) }
             }
             "clear" -> clearAudioQueue()
             "end_conversation" -> {
@@ -630,13 +673,33 @@ internal class VoiceSessionManager(
             var wasSpeakingState = false
             while (isSessionRunning) {
                 val record = audioRecord ?: break
-                if (isUserListeningPaused || isSystemListeningPaused || isSpeakingMuted) {
+                val policy = capturePolicy(
+                    systemPaused = isSystemListeningPaused,
+                    userMuted = isUserListeningPaused,
+                    speakingMuted = isSpeakingMuted,
+                )
+                if (policy == CapturePolicy.DROP) {
+                    // System / audio-focus-loss pause: the mic isn't reliably delivering and the
+                    // session is suspended, so keep dropping (no read) -- distinct from user mute.
+                    // See CH-633.
                     dispatchInputAudioLevel(0f)
                     Thread.sleep(10)
                     continue
                 }
                 val read = record.read(buffer, 0, buffer.size)
                 if (read <= 0) {
+                    continue
+                }
+
+                if (policy == CapturePolicy.SILENCE) {
+                    // User mute / speaking-mute: emit equal-length silence instead of dropping so
+                    // the server's byte-counted AudioIn clock keeps advancing and agent audio stays
+                    // aligned during playback. The real mic bytes are never transmitted while muted.
+                    // See CH-633.
+                    resetSpeakingGateState()
+                    wasSpeakingState = state == State.SPEAKING
+                    dispatchInputAudioLevel(0f)
+                    sendAudioClient(ByteArray(read))
                     continue
                 }
 
@@ -647,16 +710,18 @@ internal class VoiceSessionManager(
                 }
 
                 val rms = computeRms16(buffer, read)
-                if (isSpeakingState && !disableInterruptions) {
-                    if (!shouldPassSpeakingGate(rms)) {
-                        dispatchInputAudioLevel(0f)
-                        continue
-                    }
+                val passesSpeakingGate = if (isSpeakingState && !disableInterruptions) {
+                    shouldPassSpeakingGate(rms)
                 } else {
                     resetSpeakingGateState()
+                    true
                 }
-                dispatchInputAudioLevel(rms)
-                sendAudioClient(buffer.copyOf(read))
+                // When the echo gate is closed, emit equal-length silence instead of dropping the
+                // frames so the server's reconstructed AudioIn timeline (built by concatenating
+                // frames, with no per-frame timing) keeps its true duration and agent audio stays
+                // aligned during playback. See CH-633.
+                dispatchInputAudioLevel(if (passesSpeakingGate) rms else 0f)
+                sendAudioClient(gatedTransportFrame(passesSpeakingGate, buffer, read))
             }
         }
     }
@@ -802,6 +867,39 @@ internal class VoiceSessionManager(
         echoGateFloorRms = echoGateInitialFloorRms
     }
 }
+
+/**
+ * Frame to forward upstream for one captured buffer. When the echo gate passes, this is the
+ * captured audio; when it is closed, equal-length silence so the upstream AudioIn stream keeps its
+ * true duration (see CH-633). [source] may be a reused capture buffer, so the passing case copies.
+ */
+internal fun gatedTransportFrame(passesSpeakingGate: Boolean, source: ByteArray, length: Int): ByteArray =
+    if (passesSpeakingGate) source.copyOf(length) else ByteArray(length)
+
+/** How the record loop treats one captured buffer while capture is being suppressed. */
+internal enum class CapturePolicy {
+    /** Emit nothing (system / audio-focus-loss pause: the session is suspended, mic unreliable). */
+    DROP,
+
+    /** Emit equal-length silence (user mute / speaking-mute: the call timeline keeps advancing). */
+    SILENCE,
+
+    /** Forward captured audio through the normal (echo-gated) path. */
+    CAPTURE,
+}
+
+/**
+ * Decides how a captured buffer is handled while capture is suppressed. System pause wins and drops,
+ * because audio-focus loss suspends the session and the mic isn't reliably delivering; user mute and
+ * speaking-mute emit equal-length silence so the server's byte-counted AudioIn clock keeps advancing
+ * and agent audio stays aligned during playback. See CH-633.
+ */
+internal fun capturePolicy(systemPaused: Boolean, userMuted: Boolean, speakingMuted: Boolean): CapturePolicy =
+    when {
+        systemPaused -> CapturePolicy.DROP
+        userMuted || speakingMuted -> CapturePolicy.SILENCE
+        else -> CapturePolicy.CAPTURE
+    }
 
 private fun computeRms16(bytes: ByteArray, length: Int): Float {
     if (length < 2) {

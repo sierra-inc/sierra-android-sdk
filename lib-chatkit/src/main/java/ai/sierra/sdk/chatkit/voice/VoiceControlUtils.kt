@@ -17,7 +17,9 @@ import androidx.annotation.DrawableRes
 
 internal const val PILL_WIDTH_DP = 168.5f
 internal const val PILL_HEIGHT_DP = 48
+internal const val COMPACT_PILL_SIZE_DP = 48
 internal const val PILL_CONTENT_PADDING_DP = 20
+internal const val COMPACT_PILL_CONTENT_PADDING_DP = 12
 internal const val PILL_CONTENT_GAP_DP = 6
 internal const val ICON_CONTAINER_WIDTH_DP = 32
 internal const val ICON_CONTAINER_HEIGHT_DP = 33
@@ -30,21 +32,26 @@ internal val UNMUTE_COLOR: Int = Color.rgb(242, 75, 39)
 
 internal fun LinearLayout.configurePillButton(
     @ColorInt backgroundColor: Int,
-    contentDescriptionText: String
+    contentDescriptionText: String,
+    layout: VoiceControlButtonLayout = VoiceControlButtonLayout.PILL
 ) {
-    minimumWidth = PILL_WIDTH_DP.dp
-    minimumHeight = PILL_HEIGHT_DP.dp
-    setPadding(PILL_CONTENT_PADDING_DP.dp, 0, PILL_CONTENT_PADDING_DP.dp, 0)
+    val width = if (layout == VoiceControlButtonLayout.COMPACT) COMPACT_PILL_SIZE_DP.dp else PILL_WIDTH_DP.dp
+    val height = if (layout == VoiceControlButtonLayout.COMPACT) COMPACT_PILL_SIZE_DP.dp else PILL_HEIGHT_DP.dp
+    minimumWidth = width
+    minimumHeight = height
+    val horizontalPadding =
+        if (layout == VoiceControlButtonLayout.COMPACT) COMPACT_PILL_CONTENT_PADDING_DP else PILL_CONTENT_PADDING_DP
+    setPadding(horizontalPadding.dp, 0, horizontalPadding.dp, 0)
     showDividers = LinearLayout.SHOW_DIVIDER_MIDDLE
     dividerDrawable = GradientDrawable().apply {
         setSize(PILL_CONTENT_GAP_DP.dp, 1)
         setColor(Color.TRANSPARENT)
     }
-    background = roundedBackground(backgroundColor, PILL_HEIGHT_DP.dp / 2f)
+    background = roundedBackground(backgroundColor, height / 2f)
     isClickable = true
     isFocusable = true
     contentDescription = contentDescriptionText
-    layoutParams = LinearLayout.LayoutParams(PILL_WIDTH_DP.dp, PILL_HEIGHT_DP.dp)
+    layoutParams = LinearLayout.LayoutParams(width, height)
 }
 
 internal fun ImageView.configureLegacyButton(@ColorInt backgroundColor: Int, @ColorInt iconColor: Int) {

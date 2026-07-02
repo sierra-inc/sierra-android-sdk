@@ -6,7 +6,6 @@ package ai.sierra.sdk
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
-import android.content.res.Configuration
 import android.net.Uri
 import android.net.http.SslError
 import android.os.Build
@@ -450,12 +449,6 @@ class AgentChatFragment : Fragment() {
     internal var pageLoaded: Boolean = false
 
     /**
-     * Tracks the UI mode (light/dark) when the page was last loaded.
-     * Used to detect dark mode changes and reload with updated colors.
-     */
-    private var lastUiMode: Int = Configuration.UI_MODE_NIGHT_UNDEFINED
-
-    /**
      * Whether the web content has been revealed (spinner hidden, web view faded in). The reveal
      * runs only once per load so repeated readiness signals don't re-trigger the animation.
      */
@@ -652,18 +645,13 @@ class AgentChatFragment : Fragment() {
             return
         }
 
-        val currentUiMode = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
-        val savedUiMode = savedInstanceState?.getInt("uiMode", Configuration.UI_MODE_NIGHT_UNDEFINED)
-            ?: Configuration.UI_MODE_NIGHT_UNDEFINED
-        val uiModeChanged = savedUiMode != Configuration.UI_MODE_NIGHT_UNDEFINED && savedUiMode != currentUiMode
-
-        // Restore state if page was loaded AND UI mode hasn't changed.
-        // If UI mode changed (e.g., dark mode toggle), we need to reload with updated colors.
-        if (savedInstanceState != null && savedInstanceState.getBoolean("pageLoaded") && !uiModeChanged) {
+        // Preserve the WebView document across configuration changes when the SDK inputs are
+        // unchanged. Hosts that rebuild options with new adaptive colors still fall through to
+        // loadUrl below because the saved args no longer match the current args.
+        if (savedInstanceState != null && savedInstanceState.getBoolean("pageLoaded")) {
             val savedInstanceArgs = savedInstanceState.getParcelable<AgentChatFragmentArgs>("args")
             if (savedInstanceArgs == args) {
                 pageLoaded = true
-                lastUiMode = currentUiMode
                 restoreStorage(savedInstanceState)
                 showWebContent()
                 webView.restoreState(savedInstanceState)
@@ -671,12 +659,6 @@ class AgentChatFragment : Fragment() {
             }
         }
 
-        // If UI mode changed, restore storage but reload with new colors
-        if (uiModeChanged && savedInstanceState != null) {
-            restoreStorage(savedInstanceState)
-        }
-
-        lastUiMode = currentUiMode
         val agentConfig = args.agentConfig
         val options = args.options
         // Turn config and options into query parameters that the Android web embed expects.
@@ -892,7 +874,6 @@ class AgentChatFragment : Fragment() {
         super.onSaveInstanceState(outState)
         webView.saveState(outState)
         outState.putBoolean("pageLoaded", pageLoaded)
-        outState.putInt("uiMode", lastUiMode)
         val args = arguments?.getParcelable<AgentChatFragmentArgs>("args")
         if (args != null) {
             outState.putParcelable("args", args)

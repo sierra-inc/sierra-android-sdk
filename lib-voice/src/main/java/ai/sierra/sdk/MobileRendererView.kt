@@ -60,8 +60,18 @@ internal class MobileRendererView(
     private val delegate: MobileRendererDelegate
 ) : FrameLayout(context) {
     private val webView: WebView
+    private val mainHandler = Handler(Looper.getMainLooper())
+    // The state below is main-thread only: pushes post through mainHandler, JS bridge callbacks
+    // re-post to mainHandler, and WebView.evaluateJavascript callbacks land on the UI thread.
+    // Keep all reads/writes on the main thread so no additional synchronization is needed.
     private var isReady = false
+    private var isDestroyed = false
     private val pendingBatches = mutableListOf<String>()
+    private val pendingConversationEvents = mutableListOf<String>()
+    private val queuedConversationEvents = mutableListOf<String>()
+    private var isConversationEventFlushScheduled = false
+    private var conversationEventFlushFailureCount = 0
+    private val conversationEventFlushRunnable = Runnable { flushQueuedConversationEvents() }
 
     init {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
@@ -105,16 +115,43 @@ internal class MobileRendererView(
         }
         val bgColor = options.voiceStyle.rendererBackgroundColor ?: options.voiceStyle.backgroundColor
         builder.appendQueryParameter("backgroundColor", bgColor.toHexColor())
+        val messageStyleJSON = options.voiceStyle.messageStyleJSONString()
+        if (messageStyleJSON.isNotEmpty()) {
+            builder.appendQueryParameter("messageStyle", messageStyleJSON)
+        }
         builder.appendQueryParameter("supportsLinkClick", "true")
         webView.loadUrl(builder.build().toString())
     }
 
     fun pushAttachments(attachments: List<Map<String, Any?>>) {
+        if (isDestroyed) {
+            return
+        }
         val json = JSONArray(attachments).toString()
         if (isReady) {
             evaluatePushAttachments(json)
         } else {
             pendingBatches.add(json)
+        }
+    }
+
+    fun pushConversationEvent(event: AgentVoiceConversationEvent) {
+        if (isDestroyed) {
+            return
+        }
+        val attachments = JSONArray()
+        event.attachments.forEach { attachments.put(JSONObject(it)) }
+        val raw = JSONObject()
+            .put("messageId", event.messageId)
+            .put("eventType", event.eventType)
+            .put("role", event.role)
+            .put("text", event.text)
+            .put("attachments", attachments)
+        val json = raw.toString()
+        if (isReady) {
+            enqueueConversationEvent(json)
+        } else {
+            pendingConversationEvents.add(json)
         }
     }
 
@@ -131,7 +168,85 @@ internal class MobileRendererView(
         pending.forEach { evaluatePushAttachments(it) }
     }
 
+    private fun enqueueConversationEvent(json: String) {
+        queuedConversationEvents.add(json)
+        scheduleConversationEventFlush()
+    }
+
+    private fun scheduleConversationEventFlush(delayMs: Long = CONVERSATION_EVENT_FLUSH_DELAY_MS) {
+        if (isConversationEventFlushScheduled) {
+            return
+        }
+        isConversationEventFlushScheduled = true
+        mainHandler.postDelayed(conversationEventFlushRunnable, delayMs)
+    }
+
+    private fun flushQueuedConversationEvents() {
+        if (isDestroyed || !isReady || queuedConversationEvents.isEmpty()) {
+            isConversationEventFlushScheduled = false
+            return
+        }
+        val events = queuedConversationEvents.toList()
+        queuedConversationEvents.clear()
+        evaluatePushConversationEvents(events) { didPush ->
+            isConversationEventFlushScheduled = false
+            if (!didPush) {
+                queuedConversationEvents.addAll(0, events)
+                conversationEventFlushFailureCount += 1
+                if (conversationEventFlushFailureCount < MAX_CONVERSATION_EVENT_FLUSH_FAILURES) {
+                    scheduleConversationEventFlush(delayMs = CONVERSATION_EVENT_RETRY_DELAY_MS)
+                    return@evaluatePushConversationEvents
+                }
+                delegate.onMobileRendererError(
+                    IllegalStateException("pushConversationEvents is not available")
+                )
+                return@evaluatePushConversationEvents
+            }
+            conversationEventFlushFailureCount = 0
+            if (queuedConversationEvents.isNotEmpty()) {
+                scheduleConversationEventFlush()
+            }
+        }
+    }
+
+    private fun evaluatePushConversationEvents(
+        events: List<String>,
+        onComplete: (Boolean) -> Unit
+    ) {
+        val eventArray = JSONArray(events)
+        val escaped = JSONObject.quote(eventArray.toString())
+        val js = """
+            (function() {
+              const fn = window.sierraMobile && window.sierraMobile.pushConversationEvents;
+              if (typeof fn === 'function') {
+                fn($escaped);
+                return true;
+              }
+              return false;
+            })();
+        """.trimIndent()
+        webView.evaluateJavascript(js) { result ->
+            if (isDestroyed) {
+                return@evaluateJavascript
+            }
+            onComplete(result == "true")
+        }
+    }
+
+    private fun flushPendingConversationEvents() {
+        val pending = pendingConversationEvents.toList()
+        pendingConversationEvents.clear()
+        pending.forEach { enqueueConversationEvent(it) }
+    }
+
     fun destroy() {
+        isDestroyed = true
+        isReady = false
+        isConversationEventFlushScheduled = false
+        mainHandler.removeCallbacks(conversationEventFlushRunnable)
+        pendingBatches.clear()
+        pendingConversationEvents.clear()
+        queuedConversationEvents.clear()
         webView.stopLoading()
         webView.removeJavascriptInterface("AndroidSDK")
         removeView(webView)
@@ -141,9 +256,13 @@ internal class MobileRendererView(
     private inner class RendererBridge {
         @JavascriptInterface
         fun onOpen() {
-            Handler(Looper.getMainLooper()).post {
+            mainHandler.post {
+                if (isDestroyed) {
+                    return@post
+                }
                 isReady = true
                 webView.alpha = 1f
+                flushPendingConversationEvents()
                 flushPending()
             }
         }
@@ -177,10 +296,19 @@ internal class MobileRendererView(
             } catch (_: Throwable) {
                 return
             }
-            Handler(Looper.getMainLooper()).post {
+            mainHandler.post {
+                if (isDestroyed) {
+                    return@post
+                }
                 delegate.onLinkClick(parsed)
             }
         }
+    }
+
+    private companion object {
+        const val CONVERSATION_EVENT_FLUSH_DELAY_MS = 16L
+        const val CONVERSATION_EVENT_RETRY_DELAY_MS = 250L
+        const val MAX_CONVERSATION_EVENT_FLUSH_FAILURES = 3
     }
 }
 

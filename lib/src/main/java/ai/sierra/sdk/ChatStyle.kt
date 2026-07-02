@@ -5,6 +5,7 @@ package ai.sierra.sdk
 import android.os.Parcelable
 import kotlinx.parcelize.Parcelize
 import androidx.annotation.ColorInt
+import androidx.annotation.RestrictTo
 
 /**
  * Customize the colors and other appearance of the chat UI. When useConfiguredStyle is true in
@@ -15,7 +16,8 @@ data class ChatStyle (
     val colors: ChatStyleColors = ChatStyleColors(),
     val typography: ChatStyleTypography? = null
 ): Parcelable {
-    internal fun toJSON(): Map<String, Any> {
+    @RestrictTo(RestrictTo.Scope.LIBRARY_GROUP)
+    public fun toJSON(): Map<String, Any> {
         // Match the web embed's ChatStyle shape.
         val json = mutableMapOf<String, Any>(
             "colors" to colors.toJSON()
@@ -55,7 +57,8 @@ data class ChatStyleTypography(
     /** Typography overrides for the disclosure (disclaimer) text. */
     val disclosure: ChatTextStyle? = null,
 ) : Parcelable {
-    internal fun toJSON(): Map<String, Any?> {
+    @RestrictTo(RestrictTo.Scope.LIBRARY_GROUP)
+    public fun toJSON(): Map<String, Any?> {
         val typography = mutableMapOf<String, Any?>()
         fontFamily?.let { typography["fontFamily"] = it }
         fontSize?.let {
@@ -218,7 +221,8 @@ data class ChatStyleColors(
     /** The color of links in chat bubbles for messages from the AI assistant. */
     @ColorInt val assistantBubbleLink: Int? = null,
 ) : Parcelable {
-    internal fun toJSON(): Map<String, String> {
+    @RestrictTo(RestrictTo.Scope.LIBRARY_GROUP)
+    public fun toJSON(): Map<String, String> {
         // Match the web embed's ChatStyle.colors shape.
         val colors = mapOf(
             "background" to background,

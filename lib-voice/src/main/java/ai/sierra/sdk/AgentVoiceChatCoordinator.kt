@@ -91,6 +91,10 @@ public class AgentVoiceChatCoordinator(
         voiceOptions.muteButtonProvider = options.voiceOptions.muteButtonProvider
         voiceOptions.unmuteButtonProvider = options.voiceOptions.unmuteButtonProvider
         voiceOptions.endCallButtonProvider = options.voiceOptions.endCallButtonProvider
+        voiceOptions.compactMuteButtonProvider = options.voiceOptions.compactMuteButtonProvider
+        voiceOptions.compactUnmuteButtonProvider = options.voiceOptions.compactUnmuteButtonProvider
+        voiceOptions.compactEndCallButtonProvider = options.voiceOptions.compactEndCallButtonProvider
+        voiceOptions.textComposerViewProvider = options.voiceOptions.textComposerViewProvider
         voiceOptions.voiceOkHttpClientCustomizer = options.voiceOptions.voiceOkHttpClientCustomizer
         val shouldResumeConversation =
             voiceConversationID != null ||

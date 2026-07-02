@@ -16,14 +16,15 @@ public class MuteButtonPill @JvmOverloads constructor(
     @ColorInt iconColor: Int,
     @DrawableRes muteIconResId: Int? = null,
     title: String = "Mute",
+    layout: VoiceControlButtonLayout = VoiceControlButtonLayout.PILL,
     attrs: AttributeSet? = null,
 ) : LinearLayout(context, attrs), VoiceMuteLevelDisplaying {
     private val iconContainer = FrameLayout(context)
     private var audioLevelView: VoiceAudioLevelView? = null
 
     init {
-        configurePillButton(backgroundColor = backgroundColor, contentDescriptionText = title)
-        addIconAndLabel(title = title, iconColor = iconColor)
+        configurePillButton(backgroundColor = backgroundColor, contentDescriptionText = title, layout = layout)
+        addIconAndLabel(title = title, iconColor = iconColor, layout = layout)
 
         if (muteIconResId != null) {
             iconContainer.addView(staticIcon(context, muteIconResId, iconColor, MUTE_ICON_WIDTH_DP, MUTE_ICON_HEIGHT_DP))
@@ -49,11 +50,17 @@ public class MuteButtonPill @JvmOverloads constructor(
         audioLevelView?.resetLevels()
     }
 
-    private fun addIconAndLabel(title: String, @ColorInt iconColor: Int) {
+    private fun addIconAndLabel(
+        title: String,
+        @ColorInt iconColor: Int,
+        layout: VoiceControlButtonLayout
+    ) {
         orientation = HORIZONTAL
         gravity = Gravity.CENTER
         iconContainer.layoutParams = LayoutParams(ICON_CONTAINER_WIDTH_DP.dp, ICON_CONTAINER_HEIGHT_DP.dp)
         addView(iconContainer)
-        addView(controlLabel(context, title, iconColor))
+        if (layout == VoiceControlButtonLayout.PILL) {
+            addView(controlLabel(context, title, iconColor))
+        }
     }
 }

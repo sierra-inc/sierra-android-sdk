@@ -17,10 +17,11 @@ public class EndCallButtonPill @JvmOverloads constructor(
     @ColorInt iconColor: Int,
     @DrawableRes iconResId: Int? = null,
     title: String = "End call",
+    layout: VoiceControlButtonLayout = VoiceControlButtonLayout.PILL,
     attrs: AttributeSet? = null,
 ) : LinearLayout(context, attrs) {
     init {
-        configurePillButton(backgroundColor = backgroundColor, contentDescriptionText = title)
+        configurePillButton(backgroundColor = backgroundColor, contentDescriptionText = title, layout = layout)
         orientation = HORIZONTAL
         gravity = Gravity.CENTER
 
@@ -37,6 +38,8 @@ public class EndCallButtonPill @JvmOverloads constructor(
             )
         }
         addView(iconContainer)
-        addView(controlLabel(context, title, iconColor))
+        if (layout == VoiceControlButtonLayout.PILL) {
+            addView(controlLabel(context, title, iconColor))
+        }
     }
 }

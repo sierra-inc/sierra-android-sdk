@@ -10,7 +10,9 @@ import ai.sierra.sdk.chatkit.voice.MuteButtonLegacy
 import ai.sierra.sdk.chatkit.voice.MuteButtonPill
 import ai.sierra.sdk.chatkit.voice.UnmuteButtonLegacy
 import ai.sierra.sdk.chatkit.voice.UnmuteButtonPill
+import ai.sierra.sdk.chatkit.voice.VoiceControlButtonLayout
 import ai.sierra.sdk.chatkit.voice.VoiceMuteLevelDisplaying
+import ai.sierra.sdk.chatkit.voice.VoiceTextComposerView
 import android.Manifest
 import android.animation.ObjectAnimator
 import android.content.Context
@@ -30,16 +32,21 @@ import android.view.Gravity
 import android.view.MenuItem
 import android.view.View
 import android.view.ViewGroup
+import android.view.inputmethod.InputMethodManager
+import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
+import androidx.annotation.ColorInt
 import androidx.annotation.DrawableRes
 import androidx.annotation.FontRes
 import androidx.appcompat.widget.Toolbar
 import androidx.core.content.ContextCompat
 import androidx.core.content.res.ResourcesCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -53,6 +60,7 @@ import java.util.Locale
 private val DEFAULT_MUTE_PILL_BACKGROUND_COLOR: Int = Color.parseColor("#E7E7E7")
 private val DEFAULT_MUTE_PILL_ICON_COLOR: Int = Color.parseColor("#111111")
 private val DEFAULT_END_CALL_PILL_BACKGROUND_COLOR: Int = Color.rgb(242, 75, 39)
+private val DEFAULT_USER_BUBBLE_COLOR: Int = Color.rgb(52, 138, 210)
 
 public data class AgentAttachment(
     val type: String,
@@ -109,11 +117,21 @@ public data class AgentVoiceStyle(
     /** Optional font resource override for the disclosure shown below the controls. */
     @FontRes val conversationDisclosureFontResId: Int? = null,
     /** Font size for the disclosure shown below the controls, in sp. */
-    val conversationDisclosureTextSizeSp: Float = 12f
+    val conversationDisclosureTextSizeSp: Float = 12f,
+    /** Transcript bubble colors in the mobile renderer. */
+    val messageColors: ChatStyleColors = ChatStyleColors(),
+    /** Transcript bubble typography in the mobile renderer. */
+    val messageTypography: ChatStyleTypography? = null,
+    /** Tint color for the native text composer send button. Defaults to the user message color. */
+    @ColorInt val textComposerSendButtonTintColor: Int? = null
 ) : Parcelable {
     @IgnoredOnParcel
     @Suppress("DEPRECATION")
     internal val legacyControlsColor: Int = controlsColor
+
+    internal fun messageStyleJSONString(): String {
+        return JSONObject(ChatStyle(colors = messageColors, typography = messageTypography).toJSON()).toString()
+    }
 }
 
 @Parcelize
@@ -133,6 +151,10 @@ public data class AgentVoiceControllerOptions(
     var enableText: Boolean = true,
     /** Included in the SVP `open` submessage. Defaults to `true`. */
     var forwardAgentAttachments: Boolean = true,
+    /** When true, adds a text input and conversation-event transcript to the native voice surface. */
+    var enableTextInput: Boolean = false,
+    /** Placeholder shown in the native text composer. */
+    var textComposerPlaceholder: String = "Type a reply",
     /** Optional disclosure text shown below the native mute/end controls. */
     var disclosureText: String? = null,
     /** Optional vector/SVG drawable resource override for the mute button. */
@@ -181,6 +203,22 @@ public data class AgentVoiceControllerOptions(
     /** Optional factory for the native end-call button component. Called for each voice fragment view. */
     @IgnoredOnParcel
     public var endCallButtonProvider: ((Context) -> View)? = null
+
+    /** Optional factory for the compact mute button shown while the text composer is focused. */
+    @IgnoredOnParcel
+    public var compactMuteButtonProvider: ((Context) -> View)? = null
+
+    /** Optional factory for the compact unmute button shown while the text composer is focused. */
+    @IgnoredOnParcel
+    public var compactUnmuteButtonProvider: ((Context) -> View)? = null
+
+    /** Optional factory for the compact end-call button shown while the text composer is focused. */
+    @IgnoredOnParcel
+    public var compactEndCallButtonProvider: ((Context) -> View)? = null
+
+    /** Optional factory for the native text composer component. */
+    @IgnoredOnParcel
+    public var textComposerViewProvider: ((Context) -> VoiceTextComposerView)? = null
 
     /**
      * Optional customizer applied to the OkHttpClient builder that backs the voice WebSocket
@@ -297,7 +335,9 @@ public class AgentVoiceController(
                 controlsColor = options.chatStyle.colors.newChatButton
                     ?.takeIf { Color.alpha(it) != 0 }
                     ?: Color.parseColor("#12304C"),
-                rendererBackgroundColor = options.chatStyle.colors.background
+                rendererBackgroundColor = options.chatStyle.colors.background,
+                messageColors = options.chatStyle.colors,
+                messageTypography = options.chatStyle.typography
             ),
             hideTitleBar = options.hideTitleBar,
             voicePlaceholderText = options.greetingMessage,
@@ -353,14 +393,32 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
     private var muteButton: View? = null
     private var unmuteButton: View? = null
     private var endButton: View? = null
+    private var compactMuteButton: View? = null
+    private var compactUnmuteButton: View? = null
+    private var compactEndButton: View? = null
+    private var normalButtonsContainer: LinearLayout? = null
+    private var compactButtonsContainer: LinearLayout? = null
+    private var textComposerView: VoiceTextComposerView? = null
+    private var isTextComposerEditing = false
+    private var textComposerKeyboardShowPending = false
+    private var textComposerKeyboardShowRetryCount = 0
+    private var textComposerKeyboardGeneration = 0
+    private var textComposerKeyboardShowRunnable: Runnable? = null
+    private var textComposerKeyboardGraceRunnable: Runnable? = null
     private var muteLevelDisplay: VoiceMuteLevelDisplaying? = null
+    private var compactMuteLevelDisplay: VoiceMuteLevelDisplaying? = null
     private lateinit var disclosureLabel: TextView
     private var switchToChatMenuItem: MenuItem? = null
     private val controlButtonSpacingDp = 28
-    private val controlPillSpacingDp = 10
+    private val controlPillSpacingDp = 8
+    private val compactControlPillSpacingDp = 4
+    private val controlsHorizontalInsetDp = 16
     private val controlsTopPaddingDp = 16
     private val controlsBottomPaddingDp = 18
     private val controlsBottomPaddingWithDisclosureDp = 4
+    private val controlsRowSpacingDp = 12
+    private val textComposerKeyboardShowGraceMs = 300L
+    private val textComposerKeyboardMaxShowRetries = 10
     private val placeholderWaveformBoxSizeDp = 80
     private val placeholderWaveformIconSizeDp = 40
 
@@ -376,6 +434,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
     private var voiceExitState = VoiceExitState.NONE
     private var rendererFailed = false
     private var lastRenderableAttachmentsSignature: String? = null
+    private val deliveredConversationAttachmentSignatures = mutableSetOf<String>()
     private var isMuted = false
     private var latestInputAudioLevel = 0f
     private var latestOutputAudioLevel = 0f
@@ -456,6 +515,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
 
     override fun onDestroyView() {
         cancelInitialGreetingFallback()
+        cancelTextComposerKeyboardCallbacks()
         shutdownVoiceSessionIfNeeded()
         pulseAnimatorX?.cancel()
         pulseAnimatorX = null
@@ -505,10 +565,14 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
             customizeOkHttpClient = options.voiceOkHttpClientCustomizer,
             enableText = options.enableText,
             forwardAgentAttachments = options.forwardAgentAttachments,
+            enableConversationEvents = options.enableTextInput,
             delegate = this
         )
         voiceSession = session
         secretRefreshOrchestrator = SecretRefreshOrchestrator(session, voiceCallbacks)
+        if (options.enableTextInput) {
+            ensureRendererLoaded()
+        }
         session.connect()
         updateUIForState(VoiceSessionManager.State.CONNECTING)
     }
@@ -651,20 +715,64 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             val bottomPaddingDp = if (hasDisclosure) controlsBottomPaddingWithDisclosureDp else controlsBottomPaddingDp
-            setPadding(0, controlsTopPaddingDp.dp, 0, bottomPaddingDp.dp)
+            setPadding(
+                controlsHorizontalInsetDp.dp,
+                controlsTopPaddingDp.dp,
+                controlsHorizontalInsetDp.dp,
+                bottomPaddingDp.dp
+            )
+            if (options.enableTextInput) {
+                installKeyboardInsetsHandling(this, bottomPaddingDp.dp)
+            }
         }
-        val buttonsContainer = LinearLayout(requireContext()).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-        }
+        val buttonsContainer = createNormalControlButtons()
+        normalButtonsContainer = buttonsContainer
+
         val controlsContext = requireContext()
-        val mute = options.muteButtonProvider?.invoke(controlsContext) ?: defaultMuteButton()
-        val unmute = options.unmuteButtonProvider?.invoke(controlsContext) ?: defaultUnmuteButton()
-        val end = options.endCallButtonProvider?.invoke(controlsContext) ?: defaultEndCallButton()
-        muteButton = mute
-        unmuteButton = unmute
-        endButton = end
-        muteLevelDisplay = mute as? VoiceMuteLevelDisplaying
+        if (options.enableTextInput) {
+            val composer = options.textComposerViewProvider?.invoke(controlsContext)
+                ?: VoiceTextComposerView(
+                    controlsContext,
+                    placeholder = options.textComposerPlaceholder,
+                    sendButtonTintColor = defaultTextComposerSendButtonTintColor()
+                )
+            textComposerView = composer
+            composer.onSend = { sendComposerText() }
+            composer.editText.setOnFocusChangeListener { _, hasFocus ->
+                composer.updateSendButtonVisibility()
+                updateTextComposerEditingState(hasFocus)
+            }
+
+            val compactControls = createCompactControlButtons()
+            compactButtonsContainer = compactControls
+            compactControls.visibility = View.GONE
+
+            val editingRow = LinearLayout(requireContext()).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            editingRow.addView(
+                composer,
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            )
+            editingRow.addView(
+                compactControls,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            )
+            container.addView(
+                editingRow,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    gravity = Gravity.CENTER_HORIZONTAL
+                    bottomMargin = controlsRowSpacingDp.dp
+                }
+            )
+        }
 
         disclosureLabel = TextView(requireContext()).apply {
             text = options.disclosureText.orEmpty()
@@ -677,30 +785,6 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
             visibility = if (hasDisclosure) View.VISIBLE else View.GONE
             setPadding(24.dp, 18.dp, 24.dp, 0)
         }
-
-        mute.setOnClickListener { muteTapped() }
-        unmute.setOnClickListener { muteTapped() }
-        end.setOnClickListener { handleEndTapped() }
-
-        val muteToggleContainer = createMuteToggleContainer(mute, unmute)
-        val usesLegacyControls = usesLegacyControls(mute, unmute, end)
-        val useEqualWidths = options.controlsUseEqualWidths ?: false
-        if (useEqualWidths) {
-            buttonsContainer.layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            )
-        }
-        val controlsSpacing = (options.controlsSpacingDp ?: if (usesLegacyControls) controlButtonSpacingDp else controlPillSpacingDp).dp
-        buttonsContainer.addView(
-            muteToggleContainer,
-            controlLayoutParams(muteToggleContainer, useEqualWidths).apply { marginEnd = controlsSpacing }
-        )
-        buttonsContainer.addView(
-            end,
-            controlLayoutParams(end, useEqualWidths)
-        )
-        updateMuteControl(isMuted = false)
         container.addView(buttonsContainer)
         container.addView(
             disclosureLabel,
@@ -709,7 +793,120 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
                 ViewGroup.LayoutParams.WRAP_CONTENT
             )
         )
+        updateTextComposerEditingState(isEditing = false)
         return container
+    }
+
+    private fun installKeyboardInsetsHandling(view: View, baseBottomPadding: Int) {
+        ViewCompat.setOnApplyWindowInsetsListener(view) { controlsView, insets ->
+            val imeBottom = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
+            val systemBottom = insets.getInsets(WindowInsetsCompat.Type.systemBars()).bottom
+            val keyboardBottom = (imeBottom - systemBottom).coerceAtLeast(0)
+            val isKeyboardVisible = insets.isVisible(WindowInsetsCompat.Type.ime())
+            if (isKeyboardVisible && textComposerKeyboardShowPending) {
+                textComposerKeyboardShowPending = false
+                textComposerKeyboardShowRetryCount = 0
+                textComposerKeyboardGraceRunnable?.let { mainHandler.removeCallbacks(it) }
+                textComposerKeyboardGraceRunnable = null
+            }
+            controlsView.setPadding(
+                controlsView.paddingLeft,
+                controlsView.paddingTop,
+                controlsView.paddingRight,
+                baseBottomPadding + keyboardBottom
+            )
+            if (!isKeyboardVisible && isTextComposerEditing && !textComposerKeyboardShowPending) {
+                textComposerView?.editText?.clearFocus()
+                updateTextComposerEditingState(isEditing = false)
+            }
+            insets
+        }
+        view.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(v: View) {
+                v.removeOnAttachStateChangeListener(this)
+                ViewCompat.requestApplyInsets(v)
+            }
+
+            override fun onViewDetachedFromWindow(v: View) {}
+        })
+    }
+
+    private fun createNormalControlButtons(): LinearLayout {
+        val buttonsContainer = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        val controlsContext = requireContext()
+        val mute = options.muteButtonProvider?.invoke(controlsContext) ?: defaultMuteButton()
+        val unmute = options.unmuteButtonProvider?.invoke(controlsContext) ?: defaultUnmuteButton()
+        val end = options.endCallButtonProvider?.invoke(controlsContext) ?: defaultEndCallButton()
+        muteButton = mute
+        unmuteButton = unmute
+        endButton = end
+        muteLevelDisplay = mute as? VoiceMuteLevelDisplaying
+        configureButtonsContainer(buttonsContainer, mute, unmute, end, useOptionOverrides = true)
+        return buttonsContainer
+    }
+
+    private fun createCompactControlButtons(): LinearLayout {
+        val buttonsContainer = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        val controlsContext = requireContext()
+        val mute = options.compactMuteButtonProvider?.invoke(controlsContext) ?: defaultCompactMuteButton()
+        val unmute = options.compactUnmuteButtonProvider?.invoke(controlsContext) ?: defaultCompactUnmuteButton()
+        val end = options.compactEndCallButtonProvider?.invoke(controlsContext) ?: defaultCompactEndCallButton()
+        compactMuteButton = mute
+        compactUnmuteButton = unmute
+        compactEndButton = end
+        compactMuteLevelDisplay = mute as? VoiceMuteLevelDisplaying
+        configureButtonsContainer(buttonsContainer, mute, unmute, end, useOptionOverrides = false)
+        return buttonsContainer
+    }
+
+    private fun configureButtonsContainer(
+        buttonsContainer: LinearLayout,
+        mute: View,
+        unmute: View,
+        end: View,
+        useOptionOverrides: Boolean
+    ) {
+        mute.setOnClickListener { muteTapped() }
+        unmute.setOnClickListener { muteTapped() }
+        end.setOnClickListener { handleEndTapped() }
+
+        val usesLegacyControls = usesLegacyControls(mute, unmute, end)
+        val usesPillControls =
+            mute is MuteButtonPill && unmute is UnmuteButtonPill && end is EndCallButtonPill
+        val useDefaultResizablePillLayout =
+            useOptionOverrides && usesPillControls && options.controlsUseEqualWidths == null
+        val useEqualWidths =
+            if (useOptionOverrides) options.controlsUseEqualWidths ?: useDefaultResizablePillLayout else false
+        val muteToggleContainer = createMuteToggleContainer(mute, unmute, fillAvailableWidth = useEqualWidths)
+        if (useEqualWidths && usesPillControls) {
+            for (button in listOf(mute, unmute, end)) {
+                button.minimumWidth = 0
+            }
+        }
+        if (useEqualWidths) {
+            buttonsContainer.layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+        val controlsSpacing = if (useOptionOverrides) {
+            (options.controlsSpacingDp ?: if (usesLegacyControls) controlButtonSpacingDp else controlPillSpacingDp).dp
+        } else {
+            compactControlPillSpacingDp.dp
+        }
+        buttonsContainer.addView(muteToggleContainer, controlLayoutParams(muteToggleContainer, useEqualWidths))
+        (muteToggleContainer.layoutParams as? LinearLayout.LayoutParams)?.marginEnd = controlsSpacing
+        buttonsContainer.addView(
+            end,
+            controlLayoutParams(end, useEqualWidths)
+        )
+        updateMuteControl(isMuted = isMuted)
     }
 
     private fun defaultMuteButton(): View {
@@ -731,6 +928,37 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         )
     }
 
+    private fun defaultCompactMuteButton(): View {
+        val backgroundColor = options.voiceStyle.muteButtonColor ?: DEFAULT_MUTE_PILL_BACKGROUND_COLOR
+        return MuteButtonPill(
+            context = requireContext(),
+            backgroundColor = backgroundColor,
+            iconColor = defaultMuteButtonIconColor(backgroundColor),
+            muteIconResId = options.muteIconResId,
+            layout = VoiceControlButtonLayout.COMPACT
+        )
+    }
+
+    private fun defaultCompactUnmuteButton(): View {
+        val backgroundColor = options.voiceStyle.muteButtonColor ?: DEFAULT_MUTE_PILL_BACKGROUND_COLOR
+        return UnmuteButtonPill(
+            context = requireContext(),
+            backgroundColor = backgroundColor,
+            unmuteIconResId = options.mutedIconResId,
+            layout = VoiceControlButtonLayout.COMPACT
+        )
+    }
+
+    private fun defaultCompactEndCallButton(): View {
+        return EndCallButtonPill(
+            context = requireContext(),
+            backgroundColor = options.voiceStyle.endConversationButtonColor ?: DEFAULT_END_CALL_PILL_BACKGROUND_COLOR,
+            iconColor = options.voiceStyle.endConversationButtonIconColor,
+            iconResId = options.endConversationIconResId,
+            layout = VoiceControlButtonLayout.COMPACT
+        )
+    }
+
     private fun defaultEndCallButton(): View {
         return EndCallButtonPill(
             context = requireContext(),
@@ -739,6 +967,11 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
             iconResId = options.endConversationIconResId
         )
     }
+
+    private fun defaultTextComposerSendButtonTintColor(): Int =
+        options.voiceStyle.textComposerSendButtonTintColor
+            ?: options.voiceStyle.messageColors.userBubble
+            ?: DEFAULT_USER_BUBBLE_COLOR
 
     private fun defaultMuteButtonIconColor(backgroundColor: Int): Int {
         val configuredIconColor = options.voiceStyle.muteButtonIconColor
@@ -755,18 +988,33 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
     private fun usesLegacyControls(mute: View, unmute: View, end: View): Boolean =
         mute is MuteButtonLegacy || unmute is UnmuteButtonLegacy || end is EndCallButtonLegacy
 
-    private fun createMuteToggleContainer(mute: View, unmute: View): FrameLayout {
+    private fun createMuteToggleContainer(
+        mute: View,
+        unmute: View,
+        fillAvailableWidth: Boolean
+    ): FrameLayout {
         return FrameLayout(requireContext()).apply {
             val width = maxPositiveLayoutDimension(mute, unmute) { it.width }
             val height = maxPositiveLayoutDimension(mute, unmute) { it.height }
-            if (width != null && height != null) {
-                layoutParams = LinearLayout.LayoutParams(width, height)
+            val childWidth = if (fillAvailableWidth) {
+                ViewGroup.LayoutParams.MATCH_PARENT
+            } else {
+                width ?: ViewGroup.LayoutParams.WRAP_CONTENT
+            }
+            if (height != null && (fillAvailableWidth || width != null)) {
+                layoutParams = LinearLayout.LayoutParams(
+                    childWidth,
+                    height
+                )
             }
             for (button in listOf(mute, unmute)) {
-                addView(button, FrameLayout.LayoutParams(
-                    width ?: ViewGroup.LayoutParams.WRAP_CONTENT,
-                    height ?: ViewGroup.LayoutParams.WRAP_CONTENT
-                ))
+                addView(
+                    button,
+                    FrameLayout.LayoutParams(
+                        childWidth,
+                        height ?: ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                )
             }
         }
     }
@@ -784,7 +1032,9 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
 
     private fun controlLayoutParams(view: View, useEqualWidths: Boolean): LinearLayout.LayoutParams {
         if (useEqualWidths) {
-            return LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            val height =
+                view.layoutParams?.height?.takeIf { it > 0 } ?: ViewGroup.LayoutParams.WRAP_CONTENT
+            return LinearLayout.LayoutParams(0, height, 1f)
         }
         val width = view.layoutParams?.width?.takeIf { it > 0 } ?: ViewGroup.LayoutParams.WRAP_CONTENT
         val height = view.layoutParams?.height?.takeIf { it > 0 } ?: ViewGroup.LayoutParams.WRAP_CONTENT
@@ -794,12 +1044,132 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
     private fun updateMuteControl(isMuted: Boolean) {
         muteButton?.visibility = if (isMuted) View.GONE else View.VISIBLE
         unmuteButton?.visibility = if (isMuted) View.VISIBLE else View.GONE
+        compactMuteButton?.visibility = if (isMuted) View.GONE else View.VISIBLE
+        compactUnmuteButton?.visibility = if (isMuted) View.VISIBLE else View.GONE
         if (isMuted) {
             muteLevelDisplay?.resetLevels()
+            compactMuteLevelDisplay?.resetLevels()
         } else {
             muteLevelDisplay?.setInputLevel(latestInputAudioLevel)
             muteLevelDisplay?.setOutputLevel(latestOutputAudioLevel)
+            if (compactButtonsContainer?.visibility == View.VISIBLE) {
+                compactMuteLevelDisplay?.setInputLevel(latestInputAudioLevel)
+                compactMuteLevelDisplay?.setOutputLevel(latestOutputAudioLevel)
+            }
         }
+    }
+
+    private fun updateTextComposerEditingState(isEditing: Boolean) {
+        if (!options.enableTextInput) {
+            return
+        }
+        isTextComposerEditing = isEditing
+        setTextComposerKeyboardVisible(isVisible = isEditing)
+        compactButtonsContainer?.visibility = if (isEditing) View.VISIBLE else View.GONE
+        normalButtonsContainer?.visibility = if (isEditing) View.GONE else View.VISIBLE
+        (textComposerView?.layoutParams as? LinearLayout.LayoutParams)?.let { layoutParams ->
+            layoutParams.marginEnd = if (isEditing) 8.dp else 0
+            textComposerView?.layoutParams = layoutParams
+        }
+        disclosureLabel.visibility =
+            if (!isEditing && !options.disclosureText.isNullOrBlank()) View.VISIBLE else View.GONE
+        if (isEditing && !isMuted) {
+            compactMuteLevelDisplay?.setInputLevel(latestInputAudioLevel)
+            compactMuteLevelDisplay?.setOutputLevel(latestOutputAudioLevel)
+        } else {
+            compactMuteLevelDisplay?.resetLevels()
+        }
+    }
+
+    private fun setTextComposerKeyboardVisible(isVisible: Boolean) {
+        val editText = textComposerView?.editText ?: return
+        val inputMethodManager =
+            editText.context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+        cancelTextComposerKeyboardCallbacks()
+        val generation = ++textComposerKeyboardGeneration
+        if (isVisible) {
+            if (!editText.hasFocus()) {
+                editText.requestFocus()
+            }
+            textComposerKeyboardShowPending = true
+            textComposerKeyboardShowRetryCount = 0
+            val showRunnable = Runnable {
+                if (generation != textComposerKeyboardGeneration) {
+                    return@Runnable
+                }
+                textComposerKeyboardShowRunnable = null
+                inputMethodManager?.showSoftInput(editText, InputMethodManager.SHOW_IMPLICIT)
+                scheduleTextComposerKeyboardShowRetry(generation, editText, inputMethodManager)
+            }
+            textComposerKeyboardShowRunnable = showRunnable
+            mainHandler.post(showRunnable)
+        } else {
+            if (editText.hasFocus()) {
+                editText.clearFocus()
+            }
+            inputMethodManager?.hideSoftInputFromWindow(editText.windowToken, 0)
+        }
+    }
+
+    private fun scheduleTextComposerKeyboardShowRetry(
+        generation: Int,
+        editText: EditText,
+        inputMethodManager: InputMethodManager?
+    ) {
+        val graceRunnable = Runnable {
+            if (generation != textComposerKeyboardGeneration) {
+                return@Runnable
+            }
+            textComposerKeyboardGraceRunnable = null
+            if (!isTextComposerEditing || !editText.hasFocus()) {
+                textComposerKeyboardShowPending = false
+                textComposerKeyboardShowRetryCount = 0
+                return@Runnable
+            }
+            val isKeyboardVisible = ViewCompat.getRootWindowInsets(editText)
+                ?.isVisible(WindowInsetsCompat.Type.ime()) == true
+            if (isKeyboardVisible) {
+                textComposerKeyboardShowPending = false
+                textComposerKeyboardShowRetryCount = 0
+                return@Runnable
+            }
+            if (textComposerKeyboardShowRetryCount >= textComposerKeyboardMaxShowRetries) {
+                textComposerKeyboardShowPending = false
+                textComposerKeyboardShowRetryCount = 0
+                return@Runnable
+            }
+            textComposerKeyboardShowRetryCount += 1
+            inputMethodManager?.showSoftInput(editText, InputMethodManager.SHOW_IMPLICIT)
+            scheduleTextComposerKeyboardShowRetry(generation, editText, inputMethodManager)
+        }
+        textComposerKeyboardGraceRunnable = graceRunnable
+        mainHandler.postDelayed(graceRunnable, textComposerKeyboardShowGraceMs)
+    }
+
+    private fun cancelTextComposerKeyboardCallbacks() {
+        textComposerKeyboardShowRunnable?.let { mainHandler.removeCallbacks(it) }
+        textComposerKeyboardShowRunnable = null
+        textComposerKeyboardGraceRunnable?.let { mainHandler.removeCallbacks(it) }
+        textComposerKeyboardGraceRunnable = null
+        textComposerKeyboardShowPending = false
+        textComposerKeyboardShowRetryCount = 0
+    }
+
+    private fun sendComposerText() {
+        if (!options.enableTextInput) {
+            return
+        }
+        val composer = textComposerView ?: return
+        val text = composer.editText.text?.toString()?.trim().orEmpty()
+        if (text.isEmpty()) {
+            return
+        }
+        if (voiceSession?.sendTextClient(text) != true) {
+            Log.d(VOICE_TAG, "AgentVoiceController: text_client send skipped; voice session is not connected")
+            return
+        }
+        composer.editText.text?.clear()
+        composer.updateSendButtonVisibility(animated = false)
     }
 
     private fun ensureRendererLoaded() {
@@ -917,6 +1287,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
                 latestOutputAudioLevel = 0f
                 stopWaveformAnimation()
                 muteLevelDisplay?.resetLevels()
+                compactMuteLevelDisplay?.resetLevels()
                 setControlButtonsEnabled(false)
             }
         }
@@ -924,9 +1295,18 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
 
     private fun setControlButtonsEnabled(enabled: Boolean) {
         val alpha = if (enabled) 1f else 0.5f
-        for (button in listOfNotNull(muteButton, unmuteButton, endButton)) {
+        for (button in listOfNotNull(muteButton, unmuteButton, endButton, compactMuteButton, compactUnmuteButton, compactEndButton)) {
             button.isEnabled = enabled
             button.alpha = alpha
+        }
+        textComposerView?.let { composer ->
+            val composerEnabled = enabled && options.enableTextInput
+            composer.editText.isEnabled = composerEnabled
+            composer.sendButton.isEnabled = composerEnabled
+            composer.alpha = if (composerEnabled) 1f else 0.5f
+            if (!composerEnabled) {
+                updateTextComposerEditingState(isEditing = false)
+            }
         }
         switchToChatMenuItem?.isEnabled = enabled
         switchToChatMenuItem?.icon?.alpha = if (enabled) 255 else 128
@@ -937,6 +1317,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         latestOutputAudioLevel = 0f
         stopWaveformAnimation()
         muteLevelDisplay?.resetLevels()
+        compactMuteLevelDisplay?.resetLevels()
         shutdownVoiceSessionIfNeeded()
         errorBanner.text = message
         errorBanner.visibility = View.VISIBLE
@@ -959,6 +1340,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
             voiceSession?.pauseListening()
             latestInputAudioLevel = 0f
             muteLevelDisplay?.setInputLevel(0f)
+            compactMuteLevelDisplay?.setInputLevel(0f)
         } else {
             voiceSession?.resumeListening()
         }
@@ -1017,11 +1399,33 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         }
         latestInputAudioLevel = level
         muteLevelDisplay?.setInputLevel(level)
+        if (compactButtonsContainer?.visibility == View.VISIBLE) {
+            compactMuteLevelDisplay?.setInputLevel(level)
+        }
     }
 
     override fun onUpdateOutputAudioLevel(level: Float) {
         latestOutputAudioLevel = level
         muteLevelDisplay?.setOutputLevel(level)
+        if (compactButtonsContainer?.visibility == View.VISIBLE) {
+            compactMuteLevelDisplay?.setOutputLevel(level)
+        }
+    }
+
+    override fun onReceiveConversationEvent(event: AgentVoiceConversationEvent) {
+        mainHandler.post {
+            if (!options.enableTextInput) {
+                return@post
+            }
+            deliverConversationEventAttachmentsIfNeeded(event)
+            if (rendererFailed) {
+                return@post
+            }
+            ensureRendererLoaded()
+            revealRendererContentIfNeeded()
+            markInitialGreetingReceivedIfNeeded()
+            rendererView?.pushConversationEvent(event)
+        }
     }
 
     override fun onReceiveAttachments(attachments: List<Map<String, Any?>>) {
@@ -1039,6 +1443,11 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         }
 
         if (renderableAttachments.isEmpty()) {
+            return
+        }
+
+        if (options.enableTextInput) {
+            Log.d(VOICE_TAG, "AgentVoiceController: skipping attachments_server render because enableTextInput uses conversation events")
             return
         }
 
@@ -1061,12 +1470,44 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         if (rendererFailed) {
             return
         }
-        if (!hasShownFirstAttachment) {
-            hasShownFirstAttachment = true
-            placeholderContainer.visibility = View.GONE
-            rendererView?.visibility = View.VISIBLE
-        }
+        revealRendererContentIfNeeded()
         rendererView?.pushAttachments(renderableAttachments)
+    }
+
+    private fun deliverConversationEventAttachmentsIfNeeded(event: AgentVoiceConversationEvent) {
+        if (event.attachments.isEmpty()) {
+            return
+        }
+        val signature = "${event.messageId}:${canonicalizeForSignature(event.attachments)}"
+        if (!deliveredConversationAttachmentSignatures.add(signature)) {
+            return
+        }
+        val (secretRefreshAttachments, renderableAttachments) = event.attachments.partition {
+            SecretRefreshOrchestrator.isSecretRefreshAttachment(it)
+        }
+        if (secretRefreshAttachments.isNotEmpty()) {
+            val orchestrator = secretRefreshOrchestrator
+            if (orchestrator != null) {
+                orchestrator.setCallbacks(voiceCallbacks)
+                secretRefreshAttachments.forEach { orchestrator.handle(it) }
+            } else {
+                Log.w(VOICE_TAG, "Received secret_refresh attachment but no orchestrator is registered")
+            }
+        }
+        val agentAttachments = renderableAttachments.toAgentAttachments()
+        if (agentAttachments.isNotEmpty()) {
+            voiceCallbacks?.onAgentAttachment(agentAttachments)
+        }
+    }
+
+    private fun revealRendererContentIfNeeded() {
+        if (hasShownFirstAttachment) {
+            return
+        }
+        hasShownFirstAttachment = true
+        placeholderContainer.visibility = View.GONE
+        stopWaveformAnimation()
+        rendererView?.visibility = View.VISIBLE
     }
 
     override fun onChangeState(state: VoiceSessionManager.State) {
