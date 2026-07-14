@@ -153,6 +153,8 @@ public data class AgentVoiceControllerOptions(
     var forwardAgentAttachments: Boolean = true,
     /** When true, adds a text input and conversation-event transcript to the native voice surface. */
     var enableTextInput: Boolean = false,
+    /** When true with `enableTextInput`, streams live user transcription text in the renderer. */
+    var enableLiveTranscription: Boolean = false,
     /** Placeholder shown in the native text composer. */
     var textComposerPlaceholder: String = "Type a reply",
     /** Optional disclosure text shown below the native mute/end controls. */

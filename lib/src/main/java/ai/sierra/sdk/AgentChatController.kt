@@ -68,6 +68,22 @@ enum class TextDirection(val value: String) {
     AUTO("auto"),
 }
 
+/** Options for adding tags to the active conversation. */
+data class AddAgentTagsOptions(
+    /** Add tags as developer-only tags. */
+    val dev: Boolean? = null,
+    /** Skip tags already present on the conversation. */
+    val omitPresent: Boolean? = null,
+    /** Store `name:value` tags as custom fields visible in Agent Studio. */
+    val customField: Boolean? = null,
+) {
+    internal fun toJSONObject(): JSONObject = JSONObject().apply {
+        dev?.let { put("dev", it) }
+        omitPresent?.let { put("omitPresent", it) }
+        customField?.let { put("customField", it) }
+    }
+}
+
 /** Options for configuring an agent chat controller. */
 @Parcelize
 data class AgentChatControllerOptions(
@@ -264,6 +280,12 @@ data class AgentChatControllerOptions(
     var pinDisclosure: Boolean = false,
 
     /**
+     * When true, removes the divider (top border) drawn between the chat
+     * transcript and the message input area. Defaults to false.
+     */
+    var removeInputDivider: Boolean = false,
+
+    /**
      * Whether to show timestamps on chat messages. When null and
      * useConfiguredStyle is true, the server-configured value is used.
      */
@@ -423,6 +445,20 @@ class AgentChatController(
         this.connectedFragment?.sendUserAttachment(attachments)
     }
 
+    /**
+     * Add tags to the active conversation.
+     *
+     * The chat WebView must be loaded and a conversation must be active. The callback receives
+     * true when the tags were recorded.
+     */
+    fun addAgentTags(
+        tags: List<String>,
+        options: AddAgentTagsOptions = AddAgentTagsOptions(),
+        callback: (Boolean) -> Unit = {}
+    ) {
+        this.connectedFragment?.addAgentTags(tags, options, callback) ?: callback(false)
+    }
+
     fun showConversationList() {
         this.connectedFragment?.showConversationList()
     }
@@ -457,6 +493,15 @@ class AgentChatFragment : Fragment() {
     /** Handler/runnable for the fallback reveal of a resumed conversation. */
     private val revealHandler = Handler(Looper.getMainLooper())
     private var revealFallbackRunnable: Runnable? = null
+    // Tracks in-flight addAgentTags requests by callback ID, with a monotonic counter for IDs.
+    // Both are confined to the main thread (addAgentTags marshals onto it before touching them).
+    private val pendingAddAgentTagsCallbacks = mutableMapOf<String, PendingAddAgentTags>()
+    private var nextAddAgentTagsCallbackID = 0
+
+    private class PendingAddAgentTags(
+        val callback: (Boolean) -> Unit,
+        val timeout: Runnable,
+    )
 
     /**
      * Callback for file chooser results from the WebView.
@@ -791,6 +836,9 @@ class AgentChatFragment : Fragment() {
         if (options.pinDisclosure) {
             urlBuilder.appendQueryParameter("pinDisclosure", "true")
         }
+        if (options.removeInputDivider) {
+            urlBuilder.appendQueryParameter("removeInputDivider", "true")
+        }
         if (options.useConfiguredChatStrings) {
             urlBuilder.appendQueryParameter("useConfiguredChatStrings", "true")
         }
@@ -888,6 +936,11 @@ class AgentChatFragment : Fragment() {
         super.onDestroyView()
         revealFallbackRunnable?.let { revealHandler.removeCallbacks(it) }
         revealFallbackRunnable = null
+        pendingAddAgentTagsCallbacks.values.forEach {
+            revealHandler.removeCallbacks(it.timeout)
+            it.callback(false)
+        }
+        pendingAddAgentTagsCallbacks.clear()
         didRevealContent = false
     }
 
@@ -909,6 +962,64 @@ class AgentChatFragment : Fragment() {
             "sierraAndroid.sendUserAttachment(JSON.parse(${JSONObject.quote(payload.toString())}))",
             null
         )
+    }
+
+    fun addAgentTags(
+        tags: List<String>,
+        options: AddAgentTagsOptions,
+        callback: (Boolean) -> Unit
+    ) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            revealHandler.post { addAgentTags(tags, options, callback) }
+            return
+        }
+
+        if (!::webView.isInitialized) {
+            callback(false)
+            return
+        }
+
+        val callbackId = "addAgentTags_${System.currentTimeMillis()}_${nextAddAgentTagsCallbackID++}"
+        val timeout = Runnable {
+            pendingAddAgentTagsCallbacks.remove(callbackId)?.callback?.invoke(false)
+        }
+        pendingAddAgentTagsCallbacks[callbackId] = PendingAddAgentTags(callback, timeout)
+
+        // Escape U+2028/U+2029 so tag values cannot break the injected JavaScript source.
+        val tagsJSON = JSONObject.quote(JSONArray(tags).toString()).escapeJsLineSeparators()
+        val optionsJSON = options.toJSONObject().toString().escapeJsLineSeparators()
+        webView.evaluateJavascript(
+            """
+            (function() {
+                const finish = function(added) {
+                    window.AndroidSDK.onAddAgentTagsResult(${JSONObject.quote(callbackId)}, Boolean(added));
+                };
+                const fail = function() { finish(false); };
+                const api = window.sierraAndroid;
+                if (!api || typeof api.addAgentTags !== 'function') {
+                    fail();
+                    return;
+                }
+                Promise.resolve()
+                    .then(function() {
+                        return api.addAgentTags(JSON.parse($tagsJSON), $optionsJSON);
+                    })
+                    .then(finish)
+                    .catch(fail);
+            })();
+            """.trimIndent(),
+            null
+        )
+
+        revealHandler.postDelayed(timeout, ADD_AGENT_TAGS_TIMEOUT_MS)
+    }
+
+    internal fun onAddAgentTagsResult(callbackId: String, added: Boolean) {
+        revealHandler.post {
+            val pending = pendingAddAgentTagsCallbacks.remove(callbackId) ?: return@post
+            revealHandler.removeCallbacks(pending.timeout)
+            pending.callback(added)
+        }
     }
 
     fun showConversationList() {
@@ -1151,6 +1262,11 @@ private class ChatWebViewInterface(
     }
 
     @JavascriptInterface
+    fun onAddAgentTagsResult(callbackId: String, added: Boolean) {
+        fragment.onAddAgentTagsResult(callbackId, added)
+    }
+
+    @JavascriptInterface
     fun storeValue(key: String, value: String) {
         storage?.setItem(key, value)
     }
@@ -1237,3 +1353,11 @@ private const val TAG = "AgentChatController"
  * build); the normal path reveals as soon as the transcript has rendered.
  */
 private const val REVEAL_FALLBACK_MS = 10_000L
+private const val ADD_AGENT_TAGS_TIMEOUT_MS = 30_000L
+
+/**
+ * U+2028 and U+2029 are valid in JSON strings but line terminators in JavaScript source, so JSON
+ * embedded in an evaluateJavascript payload must escape them to keep the script parseable.
+ */
+private fun String.escapeJsLineSeparators(): String =
+    replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")

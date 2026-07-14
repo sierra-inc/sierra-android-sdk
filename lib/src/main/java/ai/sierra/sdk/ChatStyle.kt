@@ -56,6 +56,9 @@ data class ChatStyleTypography(
 
     /** Typography overrides for the disclosure (disclaimer) text. */
     val disclosure: ChatTextStyle? = null,
+
+    /** Typography overrides for the message input text. */
+    val messageInput: ChatTextStyle? = null,
 ) : Parcelable {
     @RestrictTo(RestrictTo.Scope.LIBRARY_GROUP)
     public fun toJSON(): Map<String, Any?> {
@@ -72,6 +75,7 @@ data class ChatStyleTypography(
         assistantBubble?.let { typography["assistantBubble"] = it.toJSON() }
         titleBar?.let { typography["titleBar"] = it.toJSON() }
         disclosure?.let { typography["disclosure"] = it.toJSON() }
+        messageInput?.let { typography["messageInput"] = it.toJSON() }
         return typography
     }
 }
@@ -163,6 +167,12 @@ data class ChatStyleColors(
     /** The color of the border separating the user input from the chat messages. */
     @ColorInt val border: Int? = null,
 
+    /**
+     * The background color of the message input area (the region below the divider that contains
+     * the text input). When null, falls back to `background`.
+     */
+    @ColorInt val inputBackground: Int? = null,
+
     /** The color of the top title bar. */
     @ColorInt val titleBar: Int? = null,
 
@@ -228,6 +238,7 @@ data class ChatStyleColors(
             "background" to background,
             "text" to text,
             "border" to border,
+            "inputBackground" to inputBackground,
             "titleBar" to titleBar,
             "titleBarText" to titleBarText,
             "assistantBubble" to assistantBubble,

@@ -119,6 +119,9 @@ internal class MobileRendererView(
         if (messageStyleJSON.isNotEmpty()) {
             builder.appendQueryParameter("messageStyle", messageStyleJSON)
         }
+        if (options.enableTextInput && options.enableLiveTranscription) {
+            builder.appendQueryParameter("enableLiveTranscription", "true")
+        }
         builder.appendQueryParameter("supportsLinkClick", "true")
         webView.loadUrl(builder.build().toString())
     }
