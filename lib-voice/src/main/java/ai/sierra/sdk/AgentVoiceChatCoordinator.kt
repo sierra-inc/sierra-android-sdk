@@ -29,12 +29,12 @@ public class AgentVoiceChatCoordinator(
          */
         val canSwitchToChat: Boolean = true,
         /**
-         * When true (and [canSwitchToChat] is also true), the voice session's natural end --
-         * whether the user taps the End button or the agent ends the conversation server-side --
-         * is treated like a switch-to-chat: the coordinator fires
-         * [Delegate.coordinatorDidRequestShowingChat] instead of [Delegate.coordinatorVoiceDidEnd],
-         * and the chat view opens with the voice transcript seeded. No-op if [canSwitchToChat] is
-         * false.
+         * When true, the voice session's natural end -- whether the user taps the End button or the
+         * agent ends the conversation server-side -- is treated like a switch-to-chat: the
+         * coordinator fires [Delegate.coordinatorDidRequestShowingChat] instead of
+         * [Delegate.coordinatorVoiceDidEnd], and the chat view opens with the voice transcript
+         * seeded. Independent from [canSwitchToChat], which only controls whether the manual
+         * navigation bar button is shown.
          */
         val autoShowChatOnEnd: Boolean = true,
     )
@@ -110,10 +110,8 @@ public class AgentVoiceChatCoordinator(
             voiceOptions.resumeReason = AgentVoiceResumeReason.CONTINUE_IN_VOICE
         }
         voiceOptions.onSwitchToChat = { agentInitiated -> handleSwitchToChat(agentInitiated) }
-        if (options.canSwitchToChat) {
-            voiceOptions.canSwitchToChat = true
-            voiceOptions.endRoutesToChat = options.autoShowChatOnEnd
-        }
+        voiceOptions.canSwitchToChat = options.canSwitchToChat
+        voiceOptions.autoShowChatOnEnd = options.autoShowChatOnEnd
 
         return AgentVoiceController(agent, voiceOptions).also { controller ->
             controller.conversationEventListener = options.chatOptions.conversationEventListener
@@ -149,7 +147,7 @@ public class AgentVoiceChatCoordinator(
     }
 
     override fun onVoiceEnded() {
-        if (options.canSwitchToChat && options.autoShowChatOnEnd) {
+        if (options.autoShowChatOnEnd) {
             handleSwitchToChat(agentInitiated = false)
             return
         }

@@ -19,11 +19,10 @@ class SecretRefreshOrchestratorTest {
         val callbacks = FakeCallbacks { _, reply ->
             reply(SecretExpiryResult.Success("fresh-value"))
         }
-        val orchestrator = SecretRefreshOrchestrator(session, callbacks)
+        val orchestrator = SecretRefreshOrchestrator(session, callbacks, TestScheduler())
 
         orchestrator.handle(secretRefreshAttachment())
-
-        awaitUntil { session.memoryUpdates.size == 1 && session.attachmentBatches.size == 1 }
+        shadowOf(android.os.Looper.getMainLooper()).idle()
 
         assertEquals(mapOf("TOWEL_TOKEN" to "fresh-value"), session.memoryUpdates.single().secrets)
         val ack = session.attachmentBatches.single().single()
@@ -40,14 +39,12 @@ class SecretRefreshOrchestratorTest {
         val callbacks = FakeCallbacks { _, reply ->
             reply(SecretExpiryResult.Success(null))
         }
-        val orchestrator = SecretRefreshOrchestrator(session, callbacks)
+        val orchestrator = SecretRefreshOrchestrator(session, callbacks, TestScheduler())
 
         orchestrator.handle(secretRefreshAttachment())
-
-        awaitUntil { callbacks.calls.get() == 1 }
-        Thread.sleep(50)
         shadowOf(android.os.Looper.getMainLooper()).idle()
 
+        assertEquals(1, callbacks.calls.get())
         assertTrue(session.memoryUpdates.isEmpty())
         assertTrue(session.attachmentBatches.isEmpty())
         orchestrator.cancel()
@@ -59,7 +56,8 @@ class SecretRefreshOrchestratorTest {
         val callbacks = FakeCallbacks { _, reply ->
             reply(SecretExpiryResult.Error("try again"))
         }
-        val orchestrator = SecretRefreshOrchestrator(session, callbacks)
+        val scheduler = TestScheduler()
+        val orchestrator = SecretRefreshOrchestrator(session, callbacks, scheduler)
 
         orchestrator.handle(
             secretRefreshAttachment(
@@ -71,8 +69,11 @@ class SecretRefreshOrchestratorTest {
             )
         )
 
-        awaitUntil { callbacks.calls.get() == 2 }
+        shadowOf(android.os.Looper.getMainLooper()).idle()
+        scheduler.runScheduledTasks()
+        shadowOf(android.os.Looper.getMainLooper()).idle()
 
+        assertEquals(2, callbacks.calls.get())
         assertTrue(session.memoryUpdates.isEmpty())
         assertTrue(session.attachmentBatches.isEmpty())
         orchestrator.cancel()
@@ -85,17 +86,16 @@ class SecretRefreshOrchestratorTest {
         val callbacks = FakeCallbacks { _, reply ->
             pendingReply.set(reply)
         }
-        val orchestrator = SecretRefreshOrchestrator(session, callbacks)
+        val orchestrator = SecretRefreshOrchestrator(session, callbacks, TestScheduler())
 
         orchestrator.handle(secretRefreshAttachment())
         orchestrator.handle(secretRefreshAttachment())
 
-        awaitUntil { callbacks.calls.get() == 1 && pendingReply.get() != null }
+        shadowOf(android.os.Looper.getMainLooper()).idle()
         pendingReply.get()?.invoke(SecretExpiryResult.Success("fresh-value"))
 
-        awaitUntil { session.memoryUpdates.size == 1 }
-
         assertEquals(1, callbacks.calls.get())
+        assertEquals(1, session.memoryUpdates.size)
         orchestrator.cancel()
     }
 
@@ -106,17 +106,33 @@ class SecretRefreshOrchestratorTest {
         val callbacks = FakeCallbacks { _, reply ->
             pendingReply.set(reply)
         }
-        val orchestrator = SecretRefreshOrchestrator(session, callbacks)
+        val orchestrator = SecretRefreshOrchestrator(session, callbacks, TestScheduler())
 
         orchestrator.handle(secretRefreshAttachment())
 
-        awaitUntil { pendingReply.get() != null }
+        shadowOf(android.os.Looper.getMainLooper()).idle()
         orchestrator.cancel()
 
         pendingReply.get()?.invoke(SecretExpiryResult.Success("fresh-value"))
         shadowOf(android.os.Looper.getMainLooper()).idle()
-        Thread.sleep(50)
 
+        assertTrue(session.memoryUpdates.isEmpty())
+        assertTrue(session.attachmentBatches.isEmpty())
+    }
+
+    @Test
+    fun cancelPreventsQueuedCallbackInvocation() {
+        val session = FakeVoiceSession()
+        val callbacks = FakeCallbacks { _, reply ->
+            reply(SecretExpiryResult.Success("fresh-value"))
+        }
+        val orchestrator = SecretRefreshOrchestrator(session, callbacks, TestScheduler())
+
+        orchestrator.handle(secretRefreshAttachment())
+        orchestrator.cancel()
+        shadowOf(android.os.Looper.getMainLooper()).idle()
+
+        assertEquals(0, callbacks.calls.get())
         assertTrue(session.memoryUpdates.isEmpty())
         assertTrue(session.attachmentBatches.isEmpty())
     }
@@ -127,14 +143,13 @@ class SecretRefreshOrchestratorTest {
         val callbacks = FakeCallbacks { _, reply ->
             reply(SecretExpiryResult.Success("fresh-value"))
         }
-        val orchestrator = SecretRefreshOrchestrator(session, callbacks)
+        val scheduler = TestScheduler()
+        val orchestrator = SecretRefreshOrchestrator(session, callbacks, scheduler)
 
         orchestrator.handle(secretRefreshAttachment(initialDelaySeconds = 0.2))
-        // Give handle() enough time to run on the worker and register the delayed future.
-        Thread.sleep(50)
         orchestrator.cancel()
 
-        Thread.sleep(300)
+        scheduler.runScheduledTasks()
         shadowOf(android.os.Looper.getMainLooper()).idle()
 
         assertEquals(0, callbacks.calls.get())
@@ -156,18 +171,6 @@ class SecretRefreshOrchestratorTest {
             }
         },
     )
-
-    private fun awaitUntil(condition: () -> Boolean) {
-        val deadline = System.currentTimeMillis() + 2_000
-        while (System.currentTimeMillis() < deadline) {
-            shadowOf(android.os.Looper.getMainLooper()).idle()
-            if (condition()) {
-                return
-            }
-            Thread.sleep(10)
-        }
-        error("Condition was not met before timeout")
-    }
 
     private data class MemoryUpdate(
         val secrets: Map<String, String>?,
@@ -205,6 +208,48 @@ class SecretRefreshOrchestratorTest {
         ) {
             calls.incrementAndGet()
             handler(secretName, replyHandler)
+        }
+    }
+
+    private class TestScheduler : SecretRefreshScheduler {
+        private val scheduledTasks = mutableListOf<TestScheduledTask>()
+        private var shutdown = false
+
+        override fun execute(task: () -> Unit) {
+            if (!shutdown) task()
+        }
+
+        override fun schedule(
+            delayMilliseconds: Long,
+            task: () -> Unit,
+        ): SecretRefreshScheduledTask {
+            val scheduledTask = TestScheduledTask(task)
+            scheduledTasks.add(scheduledTask)
+            return scheduledTask
+        }
+
+        override fun shutdown() {
+            shutdown = true
+        }
+
+        fun runScheduledTasks() {
+            val tasks = scheduledTasks.toList()
+            scheduledTasks.clear()
+            tasks.forEach { it.run() }
+        }
+
+        private class TestScheduledTask(
+            private val task: () -> Unit,
+        ) : SecretRefreshScheduledTask {
+            private var cancelled = false
+
+            override fun cancel() {
+                cancelled = true
+            }
+
+            fun run() {
+                if (!cancelled) task()
+            }
         }
     }
 }

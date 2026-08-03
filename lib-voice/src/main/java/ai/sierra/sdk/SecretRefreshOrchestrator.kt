@@ -8,7 +8,6 @@ import android.util.Log
 import java.lang.ref.WeakReference
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
-import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
@@ -31,9 +30,20 @@ internal interface SecretRefreshVoiceSession {
     fun sendAttachmentsClient(attachments: List<Map<String, Any?>>)
 }
 
+internal interface SecretRefreshScheduledTask {
+    fun cancel()
+}
+
+internal interface SecretRefreshScheduler {
+    fun execute(task: () -> Unit)
+    fun schedule(delayMilliseconds: Long, task: () -> Unit): SecretRefreshScheduledTask
+    fun shutdown()
+}
+
 internal class SecretRefreshOrchestrator(
     voiceSession: SecretRefreshVoiceSession,
     callbacks: VoiceCallbacks?,
+    private val scheduler: SecretRefreshScheduler = ExecutorSecretRefreshScheduler(),
 ) {
     private data class RetryConfig(
         val maxAttempts: Int,
@@ -52,15 +62,13 @@ internal class SecretRefreshOrchestrator(
     )
 
     private val voiceSessionRef = WeakReference(voiceSession)
+    // Mutable orchestration state is confined to the scheduler thread.
     private var callbacksRef = WeakReference(callbacks)
     private val inFlightSecretNames = mutableSetOf<String>()
-    private val workItems = mutableMapOf<Int, ScheduledFuture<*>>()
+    private val workItems = mutableMapOf<Int, SecretRefreshScheduledTask>()
     private var nextWorkItemID = 0
     private var cancelled = false
     private val cancelRequested = AtomicBoolean(false)
-    private val executor = Executors.newSingleThreadScheduledExecutor { runnable ->
-        Thread(runnable, "ai.sierra.SecretRefreshOrchestrator")
-    }
     private val mainHandler = Handler(Looper.getMainLooper())
 
     fun setCallbacks(callbacks: VoiceCallbacks?) {
@@ -73,13 +81,13 @@ internal class SecretRefreshOrchestrator(
     fun cancel() {
         if (!cancelRequested.compareAndSet(false, true)) return
         try {
-            executor.execute {
+            scheduler.execute {
                 // Shutdown is one-way: cancel scheduled retries and ignore any host reply that
                 // arrives after this point. executeOnWorker catches the resulting
                 // RejectedExecutionException, so late onSecretExpiry replies are dropped as part
                 // of session cleanup.
                 cleanupAfterCancel()
-                executor.shutdown()
+                scheduler.shutdown()
             }
         } catch (_: RejectedExecutionException) {
             // Already shutting down; any queued work is either complete or cannot be submitted.
@@ -89,7 +97,7 @@ internal class SecretRefreshOrchestrator(
     private fun cleanupAfterCancel() {
         cancelled = true
         for (item in workItems.values) {
-            item.cancel(false)
+            item.cancel()
         }
         workItems.clear()
         inFlightSecretNames.clear()
@@ -141,19 +149,17 @@ internal class SecretRefreshOrchestrator(
             return
         }
         val workItemID = nextWorkItemID++
-        val future = executor.schedule(
-            {
-                workItems.remove(workItemID)
-                attempt(pending, attemptNumber, pending.retryConfig.initialRetryDelaySeconds)
-            },
+        val future = scheduler.schedule(
             (delaySeconds * 1000).toLong(),
-            TimeUnit.MILLISECONDS
-        )
+        ) {
+            workItems.remove(workItemID)
+            attempt(pending, attemptNumber, pending.retryConfig.initialRetryDelaySeconds)
+        }
         workItems[workItemID] = future
     }
 
     private fun attempt(pending: PendingRefresh, attemptNumber: Int, retryDelaySeconds: Double) {
-        if (cancelled) return
+        if (cancelRequested.get() || cancelled) return
         val callbacks = callbacksRef.get()
         if (callbacks == null) {
             Log.d(VOICE_TAG, "SecretRefreshOrchestrator: no callbacks registered, dropping refresh")
@@ -162,6 +168,7 @@ internal class SecretRefreshOrchestrator(
         }
 
         mainHandler.post {
+            if (cancelRequested.get()) return@post
             callbacks.onSecretExpiry(pending.secretName) { result ->
                 executeOnWorker worker@{
                     if (cancelled) return@worker
@@ -223,21 +230,19 @@ internal class SecretRefreshOrchestrator(
             return
         }
         val workItemID = nextWorkItemID++
-        val future = executor.schedule(
-            {
-                workItems.remove(workItemID)
-                attempt(pending, attemptNumber + 1, nextDelay)
-            },
+        val future = scheduler.schedule(
             (retryDelaySeconds * 1000).toLong(),
-            TimeUnit.MILLISECONDS
-        )
+        ) {
+            workItems.remove(workItemID)
+            attempt(pending, attemptNumber + 1, nextDelay)
+        }
         workItems[workItemID] = future
     }
 
     private fun executeOnWorker(block: () -> Unit) {
         if (cancelRequested.get()) return
         try {
-            executor.execute(block)
+            scheduler.execute(block)
         } catch (_: RejectedExecutionException) {
             // The orchestrator was cancelled between the guard above and task submission.
         }
@@ -255,5 +260,31 @@ internal class SecretRefreshOrchestrator(
             val data = raw["data"] as? Map<*, *> ?: return false
             return data["type"] == SECRET_REFRESH_DATA_TYPE
         }
+    }
+}
+
+private class ExecutorSecretRefreshScheduler : SecretRefreshScheduler {
+    private val executor = Executors.newSingleThreadScheduledExecutor { runnable ->
+        Thread(runnable, "ai.sierra.SecretRefreshOrchestrator")
+    }
+
+    override fun execute(task: () -> Unit) {
+        executor.execute(task)
+    }
+
+    override fun schedule(
+        delayMilliseconds: Long,
+        task: () -> Unit,
+    ): SecretRefreshScheduledTask {
+        val future = executor.schedule(task, delayMilliseconds, TimeUnit.MILLISECONDS)
+        return object : SecretRefreshScheduledTask {
+            override fun cancel() {
+                future.cancel(false)
+            }
+        }
+    }
+
+    override fun shutdown() {
+        executor.shutdown()
     }
 }

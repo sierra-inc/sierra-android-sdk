@@ -57,6 +57,21 @@ enum class MessageLabelPlacement(val value: String) {
 }
 
 /**
+ * Controls which view(s) the disclosure text is displayed in.
+ */
+enum class DisclosurePlacement(val value: String) {
+    /** Display the disclosure above the conversation transcript. */
+    CONVERSATION("conversation"),
+    /**
+     * Display the disclosure below the "start new chat" button in the conversation
+     * list, and not in the conversation itself. Requires enableConversationList.
+     */
+    CONVERSATION_LIST("conversationList"),
+    /** Display the disclosure in both views. */
+    BOTH("both"),
+}
+
+/**
  * Controls the text direction of the chat interface.
  */
 enum class TextDirection(val value: String) {
@@ -275,9 +290,16 @@ data class AgentChatControllerOptions(
 
     /**
      * Pin the disclosure text to the top of the chat frame so that it is
-     * visible throughout the conversation.
+     * visible throughout the conversation. This controls where the disclosure
+     * sits within the conversation view, and has no effect when
+     * disclosurePlacement is CONVERSATION_LIST.
      */
     var pinDisclosure: Boolean = false,
+
+    /**
+     * Which view(s) the disclosure text is displayed in. Defaults to CONVERSATION.
+     */
+    var disclosurePlacement: DisclosurePlacement = DisclosurePlacement.CONVERSATION,
 
     /**
      * When true, removes the divider (top border) drawn between the chat
@@ -443,6 +465,10 @@ class AgentChatController(
 
     fun sendUserAttachment(attachments: List<UserAttachment>) {
         this.connectedFragment?.sendUserAttachment(attachments)
+    }
+
+    fun sendUserMessage(message: String, attachments: List<UserAttachment> = emptyList()) {
+        this.connectedFragment?.sendUserMessage(message, attachments)
     }
 
     /**
@@ -836,6 +862,12 @@ class AgentChatFragment : Fragment() {
         if (options.pinDisclosure) {
             urlBuilder.appendQueryParameter("pinDisclosure", "true")
         }
+        if (options.disclosurePlacement != DisclosurePlacement.CONVERSATION) {
+            urlBuilder.appendQueryParameter(
+                "disclosurePlacement",
+                options.disclosurePlacement.value
+            )
+        }
         if (options.removeInputDivider) {
             urlBuilder.appendQueryParameter("removeInputDivider", "true")
         }
@@ -953,16 +985,30 @@ class AgentChatFragment : Fragment() {
     }
 
     fun sendUserAttachment(attachments: List<UserAttachment>) {
-        val payload = JSONArray().apply {
-            attachments.forEach { attachment ->
-                put(attachment.toJSONObject())
-            }
-        }
+        val payload = serializedAttachments(attachments)
         webView.evaluateJavascript(
-            "sierraAndroid.sendUserAttachment(JSON.parse(${JSONObject.quote(payload.toString())}))",
+            "sierraAndroid.sendUserAttachment(JSON.parse($payload))",
             null
         )
     }
+
+    fun sendUserMessage(message: String, attachments: List<UserAttachment>) {
+        val payload = serializedAttachments(attachments)
+        val messageJSON = JSONObject.quote(message).escapeJsLineSeparators()
+        webView.evaluateJavascript(
+            "sierraAndroid.sendUserMessage($messageJSON, JSON.parse($payload))",
+            null
+        )
+    }
+
+    private fun serializedAttachments(attachments: List<UserAttachment>): String =
+        JSONObject.quote(
+            JSONArray().apply {
+                attachments.forEach { attachment ->
+                    put(attachment.toJSONObject())
+                }
+            }.toString()
+        ).escapeJsLineSeparators()
 
     fun addAgentTags(
         tags: List<String>,

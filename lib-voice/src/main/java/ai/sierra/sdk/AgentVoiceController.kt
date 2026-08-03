@@ -258,11 +258,10 @@ public data class AgentVoiceControllerOptions(
 
     /**
      * When true, tapping End closes the SVP session with the `continue_in_chat` close reason and
-     * invokes `onSwitchToChat` instead of `onVoiceEnded`. Set by `AgentVoiceChatCoordinator` when
-     * `autoShowChatOnEnd` is enabled.
+     * invokes `onSwitchToChat` instead of `onVoiceEnded`.
      */
     @IgnoredOnParcel
-    internal var endRoutesToChat: Boolean = false
+    internal var autoShowChatOnEnd: Boolean = false
 }
 
 public fun AgentVoiceControllerOptions.useLegacyVoiceControls(
@@ -610,7 +609,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
     }
 
     private fun handleEndTapped() {
-        if (options.endRoutesToChat) {
+        if (options.autoShowChatOnEnd) {
             switchToChatTapped()
         } else {
             endConversation()
