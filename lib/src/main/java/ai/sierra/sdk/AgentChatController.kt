@@ -516,6 +516,21 @@ class AgentChatFragment : Fragment() {
      */
     private var didRevealContent: Boolean = false
 
+    /**
+     * Whether the embed has signalled that it is open. It only starts listening for
+     * `appstatuschange` at that point, so earlier dispatches are dropped and the current state is
+     * re-sent once it opens.
+     */
+    private var embedOpened: Boolean = false
+
+    /**
+     * The last app status handed to the embed, used to collapse repeated transitions into a single
+     * event. Null until the first report, so the first status is always sent even when the fragment
+     * starts out backgrounded. Confined to the main thread, like the fragment lifecycle callbacks
+     * and [onEmbedOpened] that write it.
+     */
+    private var reportedAppStatus: AppStatus? = null
+
     /** Handler/runnable for the fallback reveal of a resumed conversation. */
     private val revealHandler = Handler(Looper.getMainLooper())
     private var revealFallbackRunnable: Runnable? = null
@@ -950,6 +965,48 @@ class AgentChatFragment : Fragment() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        dispatchAppStatusChange(AppStatus.FOREGROUNDED)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        dispatchAppStatusChange(AppStatus.BACKGROUNDED)
+    }
+
+    /**
+     * Called when the embed reports that it is open. Reports the fragment's current app status,
+     * since transitions dispatched while the embed was still loading were dropped.
+     */
+    internal fun onEmbedOpened() {
+        embedOpened = true
+        dispatchAppStatusChange(
+            if (isResumed) AppStatus.FOREGROUNDED else AppStatus.BACKGROUNDED
+        )
+    }
+
+    /**
+     * Reports a foreground/background transition to the embed, which forwards it to the server so
+     * agent code can read `conversation.info.embedAppStatus`. Matches the event the iOS SDK
+     * dispatches, including the local timestamp the server uses to discard stale updates.
+     */
+    private fun dispatchAppStatusChange(status: AppStatus) {
+        if (!::webView.isInitialized || !embedOpened) {
+            return
+        }
+        if (reportedAppStatus == status) {
+            return
+        }
+        reportedAppStatus = status
+        val localTimestampMs = System.currentTimeMillis()
+        webView.evaluateJavascript(
+            "window.dispatchEvent(new CustomEvent('appstatuschange', " +
+                "{ detail: { status: '${status.value}', localTimestampMs: $localTimestampMs } }))",
+            null
+        )
+    }
+
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         webView.saveState(outState)
@@ -974,6 +1031,8 @@ class AgentChatFragment : Fragment() {
         }
         pendingAddAgentTagsCallbacks.clear()
         didRevealContent = false
+        embedOpened = false
+        reportedAppStatus = null
     }
 
     fun printTranscript() {
@@ -1170,6 +1229,7 @@ private class ChatWebViewInterface(
 
     private fun handleOnOpen(isNewConversation: Boolean) {
         handler.post {
+            fragment.onEmbedOpened()
             if (isNewConversation) {
                 // New conversation: the greeting is already rendered, so reveal now.
                 fragment.showWebContent()
@@ -1400,6 +1460,12 @@ private const val TAG = "AgentChatController"
  */
 private const val REVEAL_FALLBACK_MS = 10_000L
 private const val ADD_AGENT_TAGS_TIMEOUT_MS = 30_000L
+
+/** Values must stay in sync with the iOS SDK and the server's EmbedBotAppStatus enum. */
+private enum class AppStatus(val value: String) {
+    FOREGROUNDED("FOREGROUNDED"),
+    BACKGROUNDED("BACKGROUNDED"),
+}
 
 /**
  * U+2028 and U+2029 are valid in JSON strings but line terminators in JavaScript source, so JSON
