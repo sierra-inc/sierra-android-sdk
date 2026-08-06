@@ -71,6 +71,14 @@ enum class DisclosurePlacement(val value: String) {
     BOTH("both"),
 }
 
+/** Controls when an enabled end-conversation confirmation is shown. */
+enum class EndConversationConfirmationMode(val value: String) {
+    /** Confirm whenever the user ends a conversation. */
+    ALWAYS("always"),
+    /** Confirm only while waiting for or speaking with a human agent. */
+    LIVE_CHAT("liveChat"),
+}
+
 /**
  * Controls the text direction of the chat interface.
  */
@@ -252,7 +260,9 @@ data class AgentChatControllerOptions(
     var confirmEndConversation: Boolean = false,
     /**
      * Show an end conversation button in the chat footer (above the input) while the user is
-     * speaking with a live agent. Only effective when [canEndConversation] is true.
+     * waiting for or speaking with a live agent. While waiting, the agent's transfer waiting
+     * message takes precedence when the agent has it enabled. Only effective when
+     * [canEndConversation] is true.
      */
     var footerEndConversationButton: Boolean = false,
     /**
@@ -372,7 +382,11 @@ data class AgentChatControllerOptions(
     var newChatButtonLabel: String = "Start new chat",
 
     /** Message that will be automatically sent from the user when the conversation starts. */
-    var initialUserMessage: String? = null
+    var initialUserMessage: String? = null,
+
+    /** Controls when confirmation is shown when [confirmEndConversation] is true. */
+    var confirmEndConversationMode: EndConversationConfirmationMode =
+        EndConversationConfirmationMode.ALWAYS,
 
 ) : Parcelable {
     companion object {
@@ -459,6 +473,12 @@ class AgentChatController(
         this.connectedFragment?.printTranscript()
     }
 
+    /**
+     * Ends the current conversation, if any. When confirmation is enabled,
+     * [AgentChatControllerOptions.confirmEndConversationMode] controls whether this call asks the
+     * user to confirm. [EndConversationConfirmationMode.LIVE_CHAT] confirms only while waiting for
+     * or connected to a live agent; other calls end without confirmation.
+     */
     fun endConversation() {
         this.connectedFragment?.endConversation()
     }
@@ -859,6 +879,12 @@ class AgentChatFragment : Fragment() {
         if (options.confirmEndConversation) {
             urlBuilder.appendQueryParameter("confirmEndConversation", "true")
         }
+        if (options.confirmEndConversationMode == EndConversationConfirmationMode.LIVE_CHAT) {
+            urlBuilder.appendQueryParameter(
+                "confirmEndConversationMode",
+                options.confirmEndConversationMode.value
+            )
+        }
         if (options.footerEndConversationButton) {
             urlBuilder.appendQueryParameter("footerEndConversationButton", "true")
         }
@@ -1039,6 +1065,11 @@ class AgentChatFragment : Fragment() {
         webView.evaluateJavascript("sierraAndroid.printTranscript()", null)
     }
 
+    /**
+     * Ends the current conversation using the confirmation policy configured by the owning
+     * [AgentChatController]. [EndConversationConfirmationMode.LIVE_CHAT] confirms only while
+     * waiting for or connected to a live agent.
+     */
     fun endConversation() {
         webView.evaluateJavascript("sierraAndroid.endConversation()", null)
     }
