@@ -22,15 +22,16 @@ public class VoiceAudioLevelView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null,
 ) : View(context, attrs) {
+    /** Shares the voice waveform's colors so the two audio-level surfaces on the voice screen agree. */
     @ColorInt
-    public var inputColor: Int = Color.rgb(0, 212, 255)
+    public var inputColor: Int = DEFAULT_VOICE_WAVEFORM_USER_COLOR
         set(value) {
             field = value
             invalidate()
         }
 
     @ColorInt
-    public var outputColor: Int = Color.rgb(180, 217, 140)
+    public var outputColor: Int = DEFAULT_VOICE_WAVEFORM_AGENT_COLOR
         set(value) {
             field = value
             invalidate()

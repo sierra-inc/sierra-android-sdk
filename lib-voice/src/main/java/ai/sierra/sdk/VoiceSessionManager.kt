@@ -48,6 +48,12 @@ internal interface VoiceSessionDelegate {
     fun onReceiveResumeToken(token: String) {}
     fun onUpdateInputAudioLevel(level: Float) {}
     fun onUpdateOutputAudioLevel(level: Float) {}
+
+    /** Per-band microphone levels for the voice waveform, each normalized to `0..1`. */
+    fun onUpdateInputAudioBands(bands: FloatArray) {}
+
+    /** Per-band agent-speech levels for the voice waveform, each normalized to `0..1`. */
+    fun onUpdateOutputAudioBands(bands: FloatArray) {}
 }
 
 public data class AgentVoiceConversationEvent(
@@ -165,12 +171,32 @@ internal class VoiceSessionManager(
     @Volatile private var lastDispatchedInputAudioLevel = 0f
     @Volatile private var lastDispatchedOutputAudioLevel = 0f
 
+    // Suppression paths repeat resting bands every frame, so drop the duplicates the way the scalar
+    // level dispatchers above drop repeated zeros. Both start true because nothing has been sent yet.
+    @Volatile private var lastDispatchedInputBandsWereResting = true
+    @Volatile private var lastDispatchedOutputBandsWereResting = true
+
+    // Each analyser is confined to one audio thread: the record loop owns the input one, the playback
+    // loop owns the output one.
+    private val inputSpectrumAnalyser = AudioSpectrumAnalyser()
+    private val outputSpectrumAnalyser = AudioSpectrumAnalyser()
+
+    // Playback can stop off the playback thread, which owns the output analyser. The thread advances
+    // the analyser through silence at display cadence so release matches the Web Audio analyser.
+    @Volatile private var shouldReleaseOutputSpectrum = false
+
     private var acousticEchoCanceler: AcousticEchoCanceler? = null
     private var noiseSuppressor: NoiseSuppressor? = null
     private var automaticGainControl: AutomaticGainControl? = null
 
     private val sampleRate = 24000
     private val compatibilityDate = "2026-05-07"
+
+    // One read off the recorder, sized to keep analyser updates near the Web SDK's display cadence
+    // rather than using the recorder's whole buffer. Everything downstream is driven per read --
+    // the frame-counted echo gate below, the mute pill's level, and the waveform's bands -- so the
+    // read size, not just the recorder's capacity, sets their cadence.
+    private val inputFrameBytes = inputFrameByteCount(sampleRate)
 
     // Adaptive speaking gate state (mirrors iOS behavior).
     // Accessed from the record thread.
@@ -298,8 +324,11 @@ internal class VoiceSessionManager(
         isSystemListeningPaused = false
         isSpeakingMuted = false
         resetSpeakingGateState()
+        // The audio threads own the analysers, so only the reported levels are zeroed from here.
         dispatchInputAudioLevel(0f)
         dispatchOutputAudioLevel(0f)
+        dispatchInputAudioBands(AudioSpectrumAnalyser.restingLevels())
+        dispatchOutputAudioBands(AudioSpectrumAnalyser.restingLevels())
         stopAudio()
         if (sendCloseMessage) {
             sendClose(rawReason)
@@ -312,6 +341,7 @@ internal class VoiceSessionManager(
     fun pauseListening() {
         isUserListeningPaused = true
         dispatchInputAudioLevel(0f)
+        dispatchInputAudioBands(AudioSpectrumAnalyser.restingLevels())
     }
 
     fun resumeListening() {
@@ -442,6 +472,30 @@ internal class VoiceSessionManager(
         }
         lastDispatchedOutputAudioLevel = level
         mainHandler.post { delegate.onUpdateOutputAudioLevel(level) }
+    }
+
+    private fun dispatchInputAudioBands(bands: FloatArray) {
+        val resting = bands.all { it == 0f }
+        if (resting && lastDispatchedInputBandsWereResting) {
+            return
+        }
+        lastDispatchedInputBandsWereResting = resting
+        mainHandler.post { delegate.onUpdateInputAudioBands(bands) }
+    }
+
+    private fun dispatchOutputAudioBands(bands: FloatArray) {
+        val resting = bands.all { it == 0f }
+        if (resting && lastDispatchedOutputBandsWereResting) {
+            return
+        }
+        lastDispatchedOutputBandsWereResting = resting
+        mainHandler.post { delegate.onUpdateOutputAudioBands(bands) }
+    }
+
+    /** Reports silence while preserving analyser history, matching Web Audio's muted read path. */
+    private fun dispatchSuppressedInputLevels() {
+        dispatchInputAudioLevel(0f)
+        dispatchInputAudioBands(AudioSpectrumAnalyser.restingLevels())
     }
 
     private fun nextMsgNum(): Int {
@@ -610,7 +664,7 @@ internal class VoiceSessionManager(
             audioRecord?.startRecording()
             enableAudioEffects(audioRecord?.audioSessionId ?: 0)
             audioTrack?.play()
-            startRecordLoop(minRecordSize)
+            startRecordLoop()
             startPlaybackLoop()
             return true
         } catch (e: Throwable) {
@@ -667,9 +721,10 @@ internal class VoiceSessionManager(
         }
     }
 
-    private fun startRecordLoop(bufferSize: Int) {
+    private fun startRecordLoop() {
         recordThread = thread(start = true, name = "sierra-voice-record") {
-            val buffer = ByteArray(bufferSize)
+            inputSpectrumAnalyser.reset()
+            val buffer = ByteArray(inputFrameBytes)
             var wasSpeakingState = false
             while (isSessionRunning) {
                 val record = audioRecord ?: break
@@ -682,7 +737,7 @@ internal class VoiceSessionManager(
                     // System / audio-focus-loss pause: the mic isn't reliably delivering and the
                     // session is suspended, so keep dropping (no read) -- distinct from user mute.
                     // See CH-633.
-                    dispatchInputAudioLevel(0f)
+                    dispatchSuppressedInputLevels()
                     Thread.sleep(10)
                     continue
                 }
@@ -698,7 +753,7 @@ internal class VoiceSessionManager(
                     // See CH-633.
                     resetSpeakingGateState()
                     wasSpeakingState = state == State.SPEAKING
-                    dispatchInputAudioLevel(0f)
+                    dispatchSuppressedInputLevels()
                     sendAudioClient(ByteArray(read))
                     continue
                 }
@@ -720,7 +775,12 @@ internal class VoiceSessionManager(
                 // frames so the server's reconstructed AudioIn timeline (built by concatenating
                 // frames, with no per-frame timing) keeps its true duration and agent audio stays
                 // aligned during playback. See CH-633.
-                dispatchInputAudioLevel(if (passesSpeakingGate) rms else 0f)
+                if (passesSpeakingGate) {
+                    dispatchInputAudioLevel(rms)
+                    dispatchInputAudioBands(inputSpectrumAnalyser.analyse(buffer, read))
+                } else {
+                    dispatchSuppressedInputLevels()
+                }
                 sendAudioClient(gatedTransportFrame(passesSpeakingGate, buffer, read))
             }
         }
@@ -728,9 +788,20 @@ internal class VoiceSessionManager(
 
     private fun startPlaybackLoop() {
         playbackThread = thread(start = true, name = "sierra-voice-playback") {
+            outputSpectrumAnalyser.reset()
+            shouldReleaseOutputSpectrum = false
             while (isSessionRunning) {
-                val queued = playbackQueue.poll(100, TimeUnit.MILLISECONDS) ?: continue
+                val queued = playbackQueue.poll(WAVEFORM_FRAME_MILLIS, TimeUnit.MILLISECONDS)
+                if (queued == null) {
+                    if (shouldReleaseOutputSpectrum) {
+                        val bands = outputSpectrumAnalyser.analyseSilence()
+                        dispatchOutputAudioBands(bands)
+                        shouldReleaseOutputSpectrum = bands.any { it > 0f }
+                    }
+                    continue
+                }
                 val track = audioTrack ?: continue
+                shouldReleaseOutputSpectrum = false
                 isPlaying = true
                 mainHandler.post {
                     if (!hasDeliveredInitialAudioPlayback) {
@@ -742,12 +813,14 @@ internal class VoiceSessionManager(
                     }
                 }
                 dispatchOutputAudioLevel(computeRms16(queued.data, queued.data.size))
+                dispatchOutputAudioBands(outputSpectrumAnalyser.analyse(queued.data, queued.data.size))
                 track.write(queued.data, 0, queued.data.size)
                 if (!queued.mark.isNullOrEmpty()) {
                     sendPlaybackProgress(queued.mark)
                 }
                 if (playbackQueue.isEmpty()) {
                     isPlaying = false
+                    shouldReleaseOutputSpectrum = true
                     dispatchOutputAudioLevel(0f)
                     mainHandler.post {
                         if (state == State.SPEAKING) {
@@ -773,6 +846,7 @@ internal class VoiceSessionManager(
     private fun clearAudioQueue() {
         playbackQueue.clear()
         isPlaying = false
+        shouldReleaseOutputSpectrum = true
         dispatchOutputAudioLevel(0f)
         mainHandler.post {
             try {
@@ -825,6 +899,7 @@ internal class VoiceSessionManager(
         audioTrack = null
         playbackQueue.clear()
         isPlaying = false
+        shouldReleaseOutputSpectrum = false
         lastDispatchedInputAudioLevel = 0f
         lastDispatchedOutputAudioLevel = 0f
         resetSpeakingGateState()
@@ -900,6 +975,18 @@ internal fun capturePolicy(systemPaused: Boolean, userMuted: Boolean, speakingMu
         userMuted || speakingMuted -> CapturePolicy.SILENCE
         else -> CapturePolicy.CAPTURE
     }
+
+private const val MILLIS_PER_SECOND = 1000
+private const val BYTES_PER_LINEAR16_SAMPLE = 2
+
+/** Duration of one microphone read, giving the waveform 50 input updates per second. */
+internal const val INPUT_FRAME_MILLIS = 20
+
+/** Approximate `requestAnimationFrame` cadence used while Web Audio releases into silence. */
+private const val WAVEFORM_FRAME_MILLIS = 16L
+
+internal fun inputFrameByteCount(sampleRate: Int): Int =
+    sampleRate * INPUT_FRAME_MILLIS / MILLIS_PER_SECOND * BYTES_PER_LINEAR16_SAMPLE
 
 private fun computeRms16(bytes: ByteArray, length: Int): Float {
     if (length < 2) {

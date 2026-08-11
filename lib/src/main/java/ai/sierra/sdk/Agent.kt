@@ -31,6 +31,8 @@ enum class AgentAPIHost(val hostname: String, val displayName: String) {
     PROD("sierra.chat", "Prod"),
     EU("eu.sierra.chat", "EU"),
     SG("sg.sierra.chat", "SG"),
+    JP("jp.sierra.chat", "JP"),
+    AU("au.sierra.chat", "AU"),
     STAGING("staging.sierra.chat", "Staging"),
     LOCAL("chat.sierra.codes:8083", "Local");
 
@@ -40,6 +42,8 @@ enum class AgentAPIHost(val hostname: String, val displayName: String) {
             PROD -> "https://api.sierra.chat"
             EU -> "https://eu.api.sierra.chat"
             SG -> "https://sg.api.sierra.chat"
+            JP -> "https://jp.api.sierra.chat"
+            AU -> "https://au.api.sierra.chat"
             STAGING -> "https://api-staging.sierra.chat"
             LOCAL -> "https://api.sierra.codes:8083"
         }
@@ -50,6 +54,8 @@ enum class AgentAPIHost(val hostname: String, val displayName: String) {
             PROD -> "https://sierra.chat"
             EU -> "https://eu.sierra.chat"
             SG -> "https://sg.sierra.chat"
+            JP -> "https://jp.sierra.chat"
+            AU -> "https://au.sierra.chat"
             STAGING -> "https://staging.sierra.chat"
             LOCAL -> "https://chat.sierra.codes:8083"
         }

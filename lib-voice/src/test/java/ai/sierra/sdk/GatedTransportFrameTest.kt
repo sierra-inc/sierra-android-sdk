@@ -9,6 +9,14 @@ import org.junit.Test
 
 class GatedTransportFrameTest {
     @Test
+    fun inputFrameMatches20MillisecondVoiceCadence() {
+        assertEquals(20, INPUT_FRAME_MILLIS)
+        assertEquals(960, inputFrameByteCount(sampleRate = 24000))
+        assertEquals(50, 1000 / INPUT_FRAME_MILLIS)
+        assertEquals(24000 * 2, inputFrameByteCount(sampleRate = 24000) * 50)
+    }
+
+    @Test
     fun passingGateForwardsCapturedAudio() {
         val source = byteArrayOf(1, 2, 3, 4)
         val frame = gatedTransportFrame(passesSpeakingGate = true, source = source, length = 4)

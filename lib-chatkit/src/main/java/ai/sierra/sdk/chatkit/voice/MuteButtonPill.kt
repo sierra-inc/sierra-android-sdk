@@ -18,6 +18,10 @@ public class MuteButtonPill @JvmOverloads constructor(
     title: String = "Mute",
     layout: VoiceControlButtonLayout = VoiceControlButtonLayout.PILL,
     attrs: AttributeSet? = null,
+    // Appended rather than grouped with the other colors so the @JvmOverloads signatures existing
+    // hosts compile against keep working.
+    @ColorInt waveformUserColor: Int = DEFAULT_VOICE_WAVEFORM_USER_COLOR,
+    @ColorInt waveformAgentColor: Int = DEFAULT_VOICE_WAVEFORM_AGENT_COLOR,
 ) : LinearLayout(context, attrs), VoiceMuteLevelDisplaying {
     private val iconContainer = FrameLayout(context)
     private var audioLevelView: VoiceAudioLevelView? = null
@@ -31,6 +35,8 @@ public class MuteButtonPill @JvmOverloads constructor(
         } else {
             val levelView = VoiceAudioLevelView(context).apply {
                 micColor = iconColor
+                inputColor = waveformUserColor
+                outputColor = waveformAgentColor
                 layoutParams = FrameLayout.LayoutParams(MUTE_ICON_WIDTH_DP.dp, MUTE_ICON_HEIGHT_DP.dp, Gravity.CENTER)
             }
             iconContainer.addView(levelView)

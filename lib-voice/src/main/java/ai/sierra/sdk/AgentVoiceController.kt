@@ -6,15 +6,20 @@ package ai.sierra.sdk
 import ai.sierra.sdk.voice.R
 import ai.sierra.sdk.chatkit.voice.EndCallButtonLegacy
 import ai.sierra.sdk.chatkit.voice.EndCallButtonPill
+import ai.sierra.sdk.chatkit.voice.DEFAULT_VOICE_WAVEFORM_AGENT_COLOR
+import ai.sierra.sdk.chatkit.voice.DEFAULT_VOICE_WAVEFORM_SCALE
+import ai.sierra.sdk.chatkit.voice.DEFAULT_VOICE_WAVEFORM_USER_COLOR
 import ai.sierra.sdk.chatkit.voice.MuteButtonLegacy
 import ai.sierra.sdk.chatkit.voice.MuteButtonPill
 import ai.sierra.sdk.chatkit.voice.UnmuteButtonLegacy
 import ai.sierra.sdk.chatkit.voice.UnmuteButtonPill
+import ai.sierra.sdk.chatkit.voice.VOICE_WAVEFORM_SCALE_MAX
+import ai.sierra.sdk.chatkit.voice.VOICE_WAVEFORM_SCALE_MIN
 import ai.sierra.sdk.chatkit.voice.VoiceControlButtonLayout
 import ai.sierra.sdk.chatkit.voice.VoiceMuteLevelDisplaying
 import ai.sierra.sdk.chatkit.voice.VoiceTextComposerView
+import ai.sierra.sdk.chatkit.voice.VoiceWaveformView
 import android.Manifest
-import android.animation.ObjectAnimator
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -123,7 +128,17 @@ public data class AgentVoiceStyle(
     /** Transcript bubble typography in the mobile renderer. */
     val messageTypography: ChatStyleTypography? = null,
     /** Tint color for the native text composer send button. Defaults to the user message color. */
-    @ColorInt val textComposerSendButtonTintColor: Int? = null
+    @ColorInt val textComposerSendButtonTintColor: Int? = null,
+    /** Color of the voice waveform bars driven by the agent's speech. */
+    @ColorInt val voiceWaveformAgentColor: Int = DEFAULT_VOICE_WAVEFORM_AGENT_COLOR,
+    /** Color of the voice waveform bars driven by the end user's microphone. */
+    @ColorInt val voiceWaveformUserColor: Int = DEFAULT_VOICE_WAVEFORM_USER_COLOR,
+    /**
+     * Scales the waveform shown during a voice call, as a multiplier of its default size: `1` (the
+     * default) leaves it unchanged, `0.5` renders it at half size, and `2` at double size. Values
+     * outside the range [VOICE_WAVEFORM_SCALE_MIN] to [VOICE_WAVEFORM_SCALE_MAX] are clamped.
+     */
+    val voiceWaveformSize: Float = DEFAULT_VOICE_WAVEFORM_SCALE
 ) : Parcelable {
     @IgnoredOnParcel
     @Suppress("DEPRECATION")
@@ -169,9 +184,10 @@ public data class AgentVoiceControllerOptions(
     @DrawableRes
     var endConversationIconResId: Int? = null,
     /**
-     * Optional vector/SVG drawable resource override for the central waveform placeholder. The
-     * drawable is rendered as-provided (its own colors), with no tint applied. It is shown
-     * statically, without the speaking-state pulse animation applied to the default waveform.
+     * Optional vector/SVG drawable resource override for the central waveform. The drawable is
+     * rendered as-provided (its own colors), with no tint applied. It replaces the live waveform
+     * entirely and is shown statically, so `voiceStyle.voiceWaveformSize` and the waveform colors do
+     * not apply.
      */
     @DrawableRes
     var voiceWaveformIconResId: Int? = null,
@@ -387,7 +403,19 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
     private lateinit var rootLayout: LinearLayout
     private lateinit var contentContainer: FrameLayout
     private lateinit var placeholderContainer: LinearLayout
-    private lateinit var placeholderIcon: ImageView
+    /**
+     * The center visual shown above the placeholder label: the live waveform by default, or the
+     * host's static `voiceWaveformIconResId` drawable when one is supplied. Exactly one exists per
+     * screen.
+     */
+    private sealed interface PlaceholderCenterVisual {
+        val view: View
+
+        class Waveform(override val view: VoiceWaveformView) : PlaceholderCenterVisual
+        class Icon(override val view: ImageView) : PlaceholderCenterVisual
+    }
+
+    private var placeholderCenterVisual: PlaceholderCenterVisual? = null
     private lateinit var placeholderLabel: TextView
     private lateinit var loadingIndicator: ProgressBar
     private lateinit var errorBanner: TextView
@@ -423,8 +451,6 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
     private val placeholderWaveformBoxSizeDp = 80
     private val placeholderWaveformIconSizeDp = 40
 
-    private var pulseAnimatorX: ObjectAnimator? = null
-    private var pulseAnimatorY: ObjectAnimator? = null
     private var rendererView: MobileRendererView? = null
     private var voiceSession: VoiceSessionManager? = null
     private var secretRefreshOrchestrator: SecretRefreshOrchestrator? = null
@@ -518,10 +544,6 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         cancelInitialGreetingFallback()
         cancelTextComposerKeyboardCallbacks()
         shutdownVoiceSessionIfNeeded()
-        pulseAnimatorX?.cancel()
-        pulseAnimatorX = null
-        pulseAnimatorY?.cancel()
-        pulseAnimatorY = null
         rendererView?.destroy()
         rendererView = null
         super.onDestroyView()
@@ -668,27 +690,41 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         }
         placeholderContainer.addView(loadingIndicator)
 
-        placeholderIcon = ImageView(requireContext()).apply {
-            val waveformResId = options.voiceWaveformIconResId
-            if (waveformResId != null) {
+        val waveformResId = options.voiceWaveformIconResId
+        if (waveformResId != null) {
+            val icon = ImageView(requireContext()).apply {
                 setImageResource(waveformResId)
                 // Scale custom art to fit so non-40dp assets are not clipped.
                 scaleType = ImageView.ScaleType.FIT_CENTER
-            } else {
-                setImageResource(R.drawable.sierra_ic_waveform_40)
-                scaleType = ImageView.ScaleType.CENTER
+                val inset = ((placeholderWaveformBoxSizeDp - placeholderWaveformIconSizeDp) / 2).dp
+                setPadding(inset, inset, inset, inset)
+                visibility = View.GONE
             }
-            val inset = ((placeholderWaveformBoxSizeDp - placeholderWaveformIconSizeDp) / 2).dp
-            setPadding(inset, inset, inset, inset)
-            visibility = View.GONE
-        }
-        placeholderContainer.addView(
-            placeholderIcon,
-            LinearLayout.LayoutParams(
-                placeholderWaveformBoxSizeDp.dp,
-                placeholderWaveformBoxSizeDp.dp
+            placeholderCenterVisual = PlaceholderCenterVisual.Icon(icon)
+            placeholderContainer.addView(
+                icon,
+                LinearLayout.LayoutParams(
+                    placeholderWaveformBoxSizeDp.dp,
+                    placeholderWaveformBoxSizeDp.dp
+                )
             )
-        )
+        } else {
+            val waveform = VoiceWaveformView(requireContext()).apply {
+                agentColor = options.voiceStyle.voiceWaveformAgentColor
+                userColor = options.voiceStyle.voiceWaveformUserColor
+                scale = options.voiceStyle.voiceWaveformSize
+                visibility = View.GONE
+            }
+            placeholderCenterVisual = PlaceholderCenterVisual.Waveform(waveform)
+            // The live waveform measures itself from `voiceWaveformSize`, so it wraps its content.
+            placeholderContainer.addView(
+                waveform,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+            )
+        }
 
         placeholderLabel = TextView(requireContext()).apply {
             text = options.voicePlaceholderText
@@ -916,7 +952,9 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
             context = requireContext(),
             backgroundColor = backgroundColor,
             iconColor = defaultMuteButtonIconColor(backgroundColor),
-            muteIconResId = options.muteIconResId
+            muteIconResId = options.muteIconResId,
+            waveformUserColor = options.voiceStyle.voiceWaveformUserColor,
+            waveformAgentColor = options.voiceStyle.voiceWaveformAgentColor
         )
     }
 
@@ -936,6 +974,8 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
             backgroundColor = backgroundColor,
             iconColor = defaultMuteButtonIconColor(backgroundColor),
             muteIconResId = options.muteIconResId,
+            waveformUserColor = options.voiceStyle.voiceWaveformUserColor,
+            waveformAgentColor = options.voiceStyle.voiceWaveformAgentColor,
             layout = VoiceControlButtonLayout.COMPACT
         )
     }
@@ -1197,8 +1237,29 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
 
     private fun showLoadingState(visible: Boolean) {
         loadingIndicator.visibility = if (visible) View.VISIBLE else View.GONE
-        placeholderIcon.visibility = if (visible) View.GONE else View.VISIBLE
+        placeholderCenterVisual?.view?.visibility = if (visible) View.GONE else View.VISIBLE
         placeholderLabel.visibility = if (visible) View.GONE else View.VISIBLE
+        if (visible) {
+            placeholderWaveform?.resetLevels()
+        }
+    }
+
+    /**
+     * The live waveform when it is the center visual, or null when the host's static
+     * `voiceWaveformIconResId` drawable is shown instead (level updates are meaningless then).
+     */
+    private val placeholderWaveform: VoiceWaveformView?
+        get() = (placeholderCenterVisual as? PlaceholderCenterVisual.Waveform)?.view
+
+    // The waveform gates its own frame callback on its aggregated visibility, so it stops animating
+    // on its own once the renderer takes over the center of the screen and resumes if it is shown
+    // again; these only have to route levels to it.
+    private fun setWaveformUserLevels(bands: FloatArray) {
+        placeholderWaveform?.setUserLevels(bands)
+    }
+
+    private fun setWaveformAgentLevels(bands: FloatArray) {
+        placeholderWaveform?.setAgentLevels(bands)
     }
 
     private fun markInitialGreetingReceivedIfNeeded() {
@@ -1228,65 +1289,29 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         initialGreetingFallbackRunnable = null
     }
 
-    private fun startWaveformAnimation() {
-        // A customer-supplied waveform is rendered as-provided, so it is not animated.
-        if (options.voiceWaveformIconResId != null) {
-            return
-        }
-        if (placeholderContainer.visibility != View.VISIBLE) {
-            return
-        }
-        if (pulseAnimatorX == null) {
-            pulseAnimatorX = ObjectAnimator.ofFloat(placeholderIcon, View.SCALE_X, 1f, 1.06f).apply {
-                duration = 900
-                repeatCount = ObjectAnimator.INFINITE
-                repeatMode = ObjectAnimator.REVERSE
-            }
-            pulseAnimatorX?.start()
-            pulseAnimatorY = ObjectAnimator.ofFloat(placeholderIcon, View.SCALE_Y, 1f, 1.06f).apply {
-                duration = 900
-                repeatCount = ObjectAnimator.INFINITE
-                repeatMode = ObjectAnimator.REVERSE
-            }
-            pulseAnimatorY?.start()
-        }
-    }
-
-    private fun stopWaveformAnimation() {
-        pulseAnimatorX?.cancel()
-        pulseAnimatorX = null
-        pulseAnimatorY?.cancel()
-        pulseAnimatorY = null
-        placeholderIcon.scaleX = 1f
-        placeholderIcon.scaleY = 1f
-    }
-
     private fun updateUIForState(state: VoiceSessionManager.State) {
         when (state) {
             VoiceSessionManager.State.CONNECTING -> {
                 setControlButtonsEnabled(true)
                 showLoadingState(!hasReceivedInitialGreeting)
                 cancelInitialGreetingFallback()
-                stopWaveformAnimation()
             }
             VoiceSessionManager.State.LISTENING -> {
                 showLoadingState(!hasReceivedInitialGreeting)
                 scheduleInitialGreetingFallbackIfNeeded()
                 setControlButtonsEnabled(true)
-                stopWaveformAnimation()
             }
             VoiceSessionManager.State.SPEAKING -> {
                 showLoadingState(!hasReceivedInitialGreeting)
                 cancelInitialGreetingFallback()
                 setControlButtonsEnabled(true)
-                startWaveformAnimation()
             }
             VoiceSessionManager.State.ENDED -> {
                 showLoadingState(false)
                 cancelInitialGreetingFallback()
                 latestInputAudioLevel = 0f
                 latestOutputAudioLevel = 0f
-                stopWaveformAnimation()
+                placeholderWaveform?.resetLevels()
                 muteLevelDisplay?.resetLevels()
                 compactMuteLevelDisplay?.resetLevels()
                 setControlButtonsEnabled(false)
@@ -1316,7 +1341,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
     private fun showErrorState(message: String) {
         latestInputAudioLevel = 0f
         latestOutputAudioLevel = 0f
-        stopWaveformAnimation()
+        placeholderWaveform?.resetLevels()
         muteLevelDisplay?.resetLevels()
         compactMuteLevelDisplay?.resetLevels()
         shutdownVoiceSessionIfNeeded()
@@ -1342,6 +1367,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
             latestInputAudioLevel = 0f
             muteLevelDisplay?.setInputLevel(0f)
             compactMuteLevelDisplay?.setInputLevel(0f)
+            setWaveformUserLevels(AudioSpectrumAnalyser.restingLevels())
         } else {
             voiceSession?.resumeListening()
         }
@@ -1411,6 +1437,17 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         if (compactButtonsContainer?.visibility == View.VISIBLE) {
             compactMuteLevelDisplay?.setOutputLevel(level)
         }
+    }
+
+    override fun onUpdateInputAudioBands(bands: FloatArray) {
+        if (isMuted) {
+            return
+        }
+        setWaveformUserLevels(bands)
+    }
+
+    override fun onUpdateOutputAudioBands(bands: FloatArray) {
+        setWaveformAgentLevels(bands)
     }
 
     override fun onReceiveConversationEvent(event: AgentVoiceConversationEvent) {
@@ -1507,7 +1544,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         }
         hasShownFirstAttachment = true
         placeholderContainer.visibility = View.GONE
-        stopWaveformAnimation()
+        placeholderWaveform?.resetLevels()
         rendererView?.visibility = View.VISIBLE
     }
 
