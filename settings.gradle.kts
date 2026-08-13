@@ -20,3 +20,4 @@ rootProject.name = "SierraSDK"
 include(":lib")
 include(":lib-chatkit")
 include(":lib-voice")
+include(":lib-compose")

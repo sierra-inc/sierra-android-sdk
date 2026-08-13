@@ -3,17 +3,15 @@
 plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.android")
-    id("kotlin-parcelize")
     `maven-publish`
 }
 
 android {
-    namespace = "ai.sierra.sdk"
+    namespace = "ai.sierra.sdk.compose"
     compileSdk = 34
 
     defaultConfig {
         minSdk = 24
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         consumerProguardFiles("consumer-rules.pro")
     }
@@ -23,7 +21,7 @@ android {
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro"
+                "proguard-rules.pro",
             )
         }
     }
@@ -33,6 +31,12 @@ android {
     }
     kotlinOptions {
         jvmTarget = "1.8"
+    }
+    buildFeatures {
+        compose = true
+    }
+    composeOptions {
+        kotlinCompilerExtensionVersion = "1.5.10"
     }
     publishing {
         singleVariant("release") {
@@ -49,25 +53,30 @@ android {
 }
 
 dependencies {
-    implementation("androidx.core:core-ktx:1.12.0")
-    implementation("androidx.appcompat:appcompat:1.6.1")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
+    // Support both the monorepo build and the standalone mirrored SDK build.
+    val coreModulePath = if (project.findProject(":SierraSDK") != null) ":SierraSDK" else ":lib"
 
-    // Fragment compatibility tests build the extracted chat view under Robolectric's ShadowWebView.
-    // They need no emulator, network, or agent token. Robolectric is pinned to the version the
-    // other modules already use.
+    api(project(coreModulePath))
+    api(platform("androidx.compose:compose-bom:2023.08.00"))
+    api("androidx.compose.ui:ui")
+    implementation("androidx.activity:activity-compose:1.8.2")
+
+    // The host contract tests drive a fake View, so they run under Robolectric on the JVM: no
+    // emulator, WebView, backend, or agent token. They live in the test source set together with
+    // their host activity, so no test code reaches the published artifact or a consumer's build.
+    // Robolectric is pinned to the version lib-voice already uses.
+    testImplementation(platform("androidx.compose:compose-bom:2023.08.00"))
+    testImplementation("androidx.compose.ui:ui-test-junit4")
     testImplementation("androidx.test:core:1.5.0")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.14.1")
-    androidTestImplementation("androidx.test.ext:junit:1.1.5")
-    androidTestImplementation("androidx.test:runner:1.5.2")
 }
 
 publishing {
     publications {
         register<MavenPublication>("release") {
             groupId = "ai.sierra"
-            artifactId = "sierra-android-sdk"
+            artifactId = "sierra-android-sdk-compose"
             version = "1.0"
 
             afterEvaluate {

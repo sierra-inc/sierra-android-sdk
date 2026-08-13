@@ -3,43 +3,23 @@
 
 package ai.sierra.sdk
 
-import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.net.http.SslError
-import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.os.Parcelable
-import android.print.PrintAttributes
-import android.print.PrintManager
 import android.util.Log
-import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.webkit.JavascriptInterface
-import android.webkit.SslErrorHandler
-import android.webkit.ValueCallback
-import android.webkit.WebChromeClient
-import android.webkit.WebResourceError
-import android.webkit.WebResourceRequest
-import android.webkit.WebSettings
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import android.widget.FrameLayout
-import android.widget.ProgressBar
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.IdRes
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import kotlinx.parcelize.IgnoredOnParcel
 import kotlinx.parcelize.Parcelize
-import org.json.JSONArray
-import org.json.JSONException
 import org.json.JSONObject
 
 
@@ -442,7 +422,7 @@ class AgentChatController(
     private val options: AgentChatControllerOptions,
     private val conversationState: String? = null
 ) {
-    private var connectedFragment: AgentChatFragment? = null
+    private var connectedView: AgentChatView? = null
 
     fun createFragment(): Fragment {
         return AgentChatFragment().apply {
@@ -461,8 +441,49 @@ class AgentChatController(
         }
     }
 
-    internal fun connectToFragment(fragment: AgentChatFragment) {
-        this.connectedFragment = fragment
+    /**
+     * Creates a plain Android View that hosts the agent chat without requiring a FragmentManager.
+     *
+     * Hosts that support attachments must launch [fileChooserLauncher] and pass its result to
+     * [AgentChatView.onFileChooserResult]. The view observes the lifecycle owner installed on its
+     * view tree and disposes itself when that owner is destroyed.
+     *
+     * [viewId] must be unique within the host's view hierarchy and stable across recreation. The
+     * default is suitable only when the hierarchy contains one [AgentChatView]. Hosts displaying
+     * multiple chat views must provide a different stable resource ID for each view or saved state
+     * may be restored into the wrong conversation.
+     */
+    @JvmOverloads
+    fun createView(
+        context: Context,
+        @IdRes viewId: Int = R.id.sierra_agent_chat_view,
+        fileChooserLauncher: ((Intent) -> Unit)? = null,
+    ): AgentChatView {
+        return AgentChatView(
+            context = context,
+            agentConfig = agent.config,
+            options = options,
+            conversationState = conversationState,
+            listener = MainThreadConversationEventListener(options.conversationEventListener),
+            storage = agent.getStorage(),
+            fileChooserLauncher = fileChooserLauncher,
+            onConversationEndedInternal = ::notifyConversationEndedInternal,
+            onDispose = ::disconnectFromView,
+            viewId = viewId,
+        ).also {
+            connectToView(it)
+            it.initializeWhenAttached()
+        }
+    }
+
+    internal fun connectToView(view: AgentChatView) {
+        connectedView = view
+    }
+
+    internal fun disconnectFromView(view: AgentChatView) {
+        if (connectedView === view) {
+            connectedView = null
+        }
     }
 
     internal fun notifyConversationEndedInternal() {
@@ -470,7 +491,7 @@ class AgentChatController(
     }
 
     fun printTranscript() {
-        this.connectedFragment?.printTranscript()
+        connectedView?.printTranscript()
     }
 
     /**
@@ -480,100 +501,55 @@ class AgentChatController(
      * or connected to a live agent; other calls end without confirmation.
      */
     fun endConversation() {
-        this.connectedFragment?.endConversation()
+        connectedView?.endConversation()
     }
 
     fun sendUserAttachment(attachments: List<UserAttachment>) {
-        this.connectedFragment?.sendUserAttachment(attachments)
+        connectedView?.sendUserAttachment(attachments)
     }
 
     fun sendUserMessage(message: String, attachments: List<UserAttachment> = emptyList()) {
-        this.connectedFragment?.sendUserMessage(message, attachments)
+        connectedView?.sendUserMessage(message, attachments)
     }
 
     /**
      * Add tags to the active conversation.
      *
-     * The chat WebView must be loaded and a conversation must be active. The callback receives
-     * true when the tags were recorded.
+     * The chat WebView must be initialized and a conversation must be active. Calls made before
+     * the view is initialized complete with false. Otherwise, the callback receives true when the
+     * tags were recorded.
      */
     fun addAgentTags(
         tags: List<String>,
         options: AddAgentTagsOptions = AddAgentTagsOptions(),
         callback: (Boolean) -> Unit = {}
     ) {
-        this.connectedFragment?.addAgentTags(tags, options, callback) ?: callback(false)
+        connectedView?.addAgentTags(tags, options, callback) ?: callback(false)
     }
 
     fun showConversationList() {
-        this.connectedFragment?.showConversationList()
+        connectedView?.showConversationList()
     }
 }
 
 @Parcelize
-private data class AgentChatFragmentArgs(
+// AgentChatView also uses this state type. The Fragment-era name must remain stable because Android
+// persists Parcelable class names, and renaming it would break state saved by older SDK versions.
+internal data class AgentChatFragmentArgs(
     val agentConfig: AgentConfig,
     val options: AgentChatControllerOptions,
     val conversationState: String? = null
 ) : Parcelable
 
 class AgentChatFragment : Fragment() {
-    private lateinit var webView: WebView
-    private lateinit var loadingSpinner: ProgressBar
-    internal var listener: ConversationEventListener? = null
-    internal var controller: AgentChatController? = null
-    private var storage: ConversationStorage? = null
-
-    /**
-     * Flag used to keep track that of whether the web view successfully loaded or not. We only
-     * restore state (and avoid reloading the URL) if the last load was successful.
-     * */
-    internal var pageLoaded: Boolean = false
-
-    /**
-     * Whether the web content has been revealed (spinner hidden, web view faded in). The reveal
-     * runs only once per load so repeated readiness signals don't re-trigger the animation.
-     */
-    private var didRevealContent: Boolean = false
-
-    /**
-     * Whether the embed has signalled that it is open. It only starts listening for
-     * `appstatuschange` at that point, so earlier dispatches are dropped and the current state is
-     * re-sent once it opens.
-     */
-    private var embedOpened: Boolean = false
-
-    /**
-     * The last app status handed to the embed, used to collapse repeated transitions into a single
-     * event. Null until the first report, so the first status is always sent even when the fragment
-     * starts out backgrounded. Confined to the main thread, like the fragment lifecycle callbacks
-     * and [onEmbedOpened] that write it.
-     */
-    private var reportedAppStatus: AppStatus? = null
-
-    /** Handler/runnable for the fallback reveal of a resumed conversation. */
-    private val revealHandler = Handler(Looper.getMainLooper())
-    private var revealFallbackRunnable: Runnable? = null
-    // Tracks in-flight addAgentTags requests by callback ID, with a monotonic counter for IDs.
-    // Both are confined to the main thread (addAgentTags marshals onto it before touching them).
-    private val pendingAddAgentTagsCallbacks = mutableMapOf<String, PendingAddAgentTags>()
-    private var nextAddAgentTagsCallbackID = 0
-
-    private class PendingAddAgentTags(
-        val callback: (Boolean) -> Unit,
-        val timeout: Runnable,
-    )
-
-    /**
-     * Callback for file chooser results from the WebView.
-     * Used to pass selected file URIs back to the WebView's file input element.
-     */
-    private var filePathCallback: ValueCallback<Array<Uri>>? = null
-
+    private var chatView: AgentChatView? = null
     /**
      * Activity result launcher for the file chooser intent.
      */
     private lateinit var fileChooserLauncher: ActivityResultLauncher<Intent>
+    internal var listener: ConversationEventListener? = null
+    internal var controller: AgentChatController? = null
+    private var storage: ConversationStorage? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -594,8 +570,7 @@ class AgentChatFragment : Fragment() {
                 // User cancelled - return null to indicate cancellation
                 null
             }
-            filePathCallback?.onReceiveValue(uris)
-            filePathCallback = null
+            chatView?.onFileChooserResult(uris)
         }
 
         // We stash the value of listener and controller in a view model so that when we're recreated we can still
@@ -612,8 +587,6 @@ class AgentChatFragment : Fragment() {
         } else {
             controller = viewModel.controller
         }
-        controller?.connectToFragment(this)
-
         // Resolve storage: prefer Agent's storage, fall back to creating one from the
         // parceled config. This handles process death where the ViewModel (and thus the
         // Agent) is gone but the Fragment arguments survive.
@@ -632,7 +605,6 @@ class AgentChatFragment : Fragment() {
         }
     }
 
-    @SuppressLint("SetJavaScriptEnabled")
     override fun onCreateView(
         inflater: LayoutInflater, container: ViewGroup?,
         savedInstanceState: Bundle?
@@ -648,421 +620,51 @@ class AgentChatFragment : Fragment() {
             }
         }
 
-        val rootContainer = FrameLayout(requireContext()).apply {
-            layoutParams = ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-            args.options.chatStyle.colors.background?.let { setBackgroundColor(it) }
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            WebView.startSafeBrowsing(requireContext()) {}
-        }
-        webView = WebView(requireContext()).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-            // Keep the web content hidden until the embed reports it is ready,
-            // preventing transient web loading states from flashing onscreen.
-            alpha = 0f
-            // Set background color to match chat style to avoid white flash while loading
-            args.options.chatStyle.colors.background?.let { setBackgroundColor(it) }
-        }
-
-        val agentConfig = args.agentConfig
-        val chatWebViewClient =
-            ChatWebViewClient(this, agentConfig, listener)
-        webView.apply {
-            settings.javaScriptEnabled = true
-            settings.domStorageEnabled = true
-            settings.userAgentString = generateUserAgent(requireContext())
-            // Sierra WebView hardening (CWE-693). Inlined adjacent to the WebView construction so
-            // SAST tools recognize the defenses; do not factor into a helper.
-            settings.allowFileAccess = false
-            @Suppress("DEPRECATION")
-            settings.allowFileAccessFromFileURLs = false
-            @Suppress("DEPRECATION")
-            settings.allowUniversalAccessFromFileURLs = false
-            settings.allowContentAccess = false
-            settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-            webViewClient = chatWebViewClient
-            webChromeClient = object : WebChromeClient() {
-                override fun onShowFileChooser(
-                    webView: WebView?,
-                    filePathCallback: ValueCallback<Array<Uri>>?,
-                    fileChooserParams: FileChooserParams?
-                ): Boolean {
-                    // Cancel any pending callback
-                    this@AgentChatFragment.filePathCallback?.onReceiveValue(null)
-                    this@AgentChatFragment.filePathCallback = filePathCallback
-
-                    val intent = fileChooserParams?.createIntent() ?: Intent(Intent.ACTION_GET_CONTENT).apply {
-                        type = "*/*"
-                    }
-
-                    try {
-                        fileChooserLauncher.launch(intent)
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Cannot launch file chooser", e)
-                        this@AgentChatFragment.filePathCallback?.onReceiveValue(null)
-                        this@AgentChatFragment.filePathCallback = null
-                        return false
-                    }
-                    return true
-                }
-            }
-            addJavascriptInterface(
-                ChatWebViewInterface(
-                    requireContext(),
-                    storage,
-                    listener,
-                    this@AgentChatFragment,
-                    this,
-                    args.options.conversationOptions
-                ),
-                "AndroidSDK"
-            )
-        }
-        if (agentConfig.apiHost == AgentAPIHost.LOCAL) {
-            WebView.setWebContentsDebuggingEnabled(true)
-        }
-
-        loadingSpinner = ProgressBar(requireContext()).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                Gravity.CENTER
-            )
-            visibility = View.VISIBLE
-        }
-
-        rootContainer.addView(webView)
-        rootContainer.addView(loadingSpinner)
-        return rootContainer
-    }
-
-    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
-        super.onViewCreated(view, savedInstanceState)
-        val args = arguments?.getParcelable<AgentChatFragmentArgs>("args")
-        if (args == null) {
-            Log.w(TAG, "Could not find AgentChatFragment args, will not initialize web view")
-            return
-        }
-
-        // Preserve the WebView document across configuration changes when the SDK inputs are
-        // unchanged. Hosts that rebuild options with new adaptive colors still fall through to
-        // loadUrl below because the saved args no longer match the current args.
-        if (savedInstanceState != null && savedInstanceState.getBoolean("pageLoaded")) {
-            val savedInstanceArgs = savedInstanceState.getParcelable<AgentChatFragmentArgs>("args")
-            if (savedInstanceArgs == args) {
-                pageLoaded = true
-                restoreStorage(savedInstanceState)
-                showWebContent()
-                webView.restoreState(savedInstanceState)
-                return
-            }
-        }
-
-        val agentConfig = args.agentConfig
-        val options = args.options
-        // Turn config and options into query parameters that the Android web embed expects.
-        val urlBuilder = Uri.parse(agentConfig.url).buildUpon()
-        if (agentConfig.target != null && agentConfig.target.isNotEmpty()) {
-            urlBuilder.appendQueryParameter("target", agentConfig.target)
-        }
-
-        // Should match the web embed's Brand shape.
-        val brandMap = mutableMapOf<String, Any>(
-            "botName" to options.name,
-            "greetingMessage" to options.greetingMessage,
-            "errorMessage" to options.errorMessage,
-            "inactivityMessage" to (options.inactivityMessage ?: ""),
-            "agentTransferWaitingMessage" to options.agentTransferWaitingMessage,
-            "agentTransferQueueSizeMessage" to options.agentTransferQueueSizeMessage,
-            "agentTransferQueueNextMessage" to options.agentTransferQueueNextMessage,
-            "agentJoinedMessage" to options.agentJoinedMessage,
-            "agentLeftMessage" to options.agentLeftMessage,
-            "chatStyle" to JSONObject(options.chatStyle.toJSON()).toString(),
-            "messageLabelPlacement" to options.messageLabelPlacement.value,
-        )
-        options.showTimestamps?.let { brandMap["showTimestamps"] = it }
-        options.showSpeakerLabels?.let { brandMap["showBotName"] = it }
-        options.showAvatars?.let { brandMap["showAvatars"] = it }
-        options.agentAvatarURL?.let { brandMap["agentAvatarURL"] = it }
-        options.sendButtonSVG?.let { brandMap["sendButtonSVG"] = it }
-        options.sendButtonDisabledSVG?.let { brandMap["sendButtonDisabledSVG"] = it }
-        // If locale auto-detect or server-configured chat strings are enabled, remove any messages
-        // that are set to their default value so server-configured values or locale defaults can win.
-        if (options.shouldOmitDefaultChatStrings()) {
-            if (!options.hasCustomGreetingMessage()) {
-                brandMap.remove("greetingMessage")
-            }
-            if (options.errorMessage == AgentChatControllerOptions.DEFAULTS.errorMessage) {
-                brandMap.remove("errorMessage")
-            }
-            if (options.agentTransferWaitingMessage == AgentChatControllerOptions.DEFAULTS.agentTransferWaitingMessage) {
-                brandMap.remove("agentTransferWaitingMessage")
-            }
-            if (options.agentTransferQueueSizeMessage == AgentChatControllerOptions.DEFAULTS.agentTransferQueueSizeMessage) {
-                brandMap.remove("agentTransferQueueSizeMessage")
-            }
-            if (options.agentTransferQueueNextMessage == AgentChatControllerOptions.DEFAULTS.agentTransferQueueNextMessage) {
-                brandMap.remove("agentTransferQueueNextMessage")
-            }
-            if (options.agentJoinedMessage == AgentChatControllerOptions.DEFAULTS.agentJoinedMessage) {
-                brandMap.remove("agentJoinedMessage")
-            }
-            if (options.agentLeftMessage == AgentChatControllerOptions.DEFAULTS.agentLeftMessage) {
-                brandMap.remove("agentLeftMessage")
-            }
-        }
-        val brandJSON = JSONObject(brandMap as Map<*, *>).toString()
-
-        urlBuilder.appendQueryParameter("brand", brandJSON)
-
-        // Subset of the web embed's chat UI strings.
-        val chatInterfaceStringsMap = mutableMapOf(
-            "inputPlaceholder" to options.inputPlaceholder,
-            "disclosure" to (options.disclosure ?: ""),
-            "conversationEndedMessage" to options.conversationEndedMessage,
-            "newChatButtonLabel" to options.newChatButtonLabel,
-            "printTranscriptMenuLabel" to options.saveTranscriptLabel,
-            "endConversationMenuLabel" to options.endConversationLabel,
-        )
-        if (options.shouldOmitDefaultChatStrings()) {
-            if (options.newChatButtonLabel == AgentChatControllerOptions.DEFAULTS.newChatButtonLabel) {
-                chatInterfaceStringsMap.remove("newChatButtonLabel")
-            }
-            if (options.saveTranscriptLabel == AgentChatControllerOptions.DEFAULTS.saveTranscriptLabel) {
-                chatInterfaceStringsMap.remove("printTranscriptMenuLabel")
-            }
-            if (options.endConversationLabel == AgentChatControllerOptions.DEFAULTS.endConversationLabel) {
-                chatInterfaceStringsMap.remove("endConversationMenuLabel")
-            }
-        }
-        val chatInterfaceStrings = JSONObject(chatInterfaceStringsMap as Map<*, *>).toString()
-        urlBuilder.appendQueryParameter("chatInterfaceStrings", chatInterfaceStrings)
-
-        if (options.hideTitleBar) {
-            urlBuilder.appendQueryParameter("hideTitleBar", "true")
-        }
-        urlBuilder.appendQueryParameter("persistenceMode", "custom")
-        val conversationOptions = options.conversationOptions ?: ConversationOptions()
-        // The custom greeting was initially a UI-only concept and thus specified via AgentChatControllerOptions,
-        // but it now also affects the API, so it's in ConversationOptions. Read it from both places
-        // so that old clients don't need to change anything.
-        var customGreeting = conversationOptions.customGreeting
-        if (customGreeting == null && options.shouldUseGreetingMessageAsCustomGreeting()) {
-            customGreeting = options.greetingMessage
-        }
-
-        val locale = conversationOptions.locale ?: resources.configuration.locales[0]
-        urlBuilder.appendQueryParameter("locale", locale.toLanguageTag())
-        // Variables and secrets are intentionally not added to the URL. They are delivered to the
-        // web embed via the AndroidSDK.getInitialMemory() bridge method (see ChatWebViewInterface)
-        // so they cannot leak into device, proxy, or analytics logs.
-        if (customGreeting != null) {
-            urlBuilder.appendQueryParameter("greeting", customGreeting)
-        }
-        urlBuilder.appendQueryParameter(
-            "enableContactCenter",
-            conversationOptions.enableContactCenter.toString()
-        )
-        if (options.canPrintTranscript) {
-            urlBuilder.appendQueryParameter("canPrintTranscript", "true")
-        }
-        if (options.canEndConversation) {
-            urlBuilder.appendQueryParameter("canEndConversation", "true")
-        }
-        if (options.confirmEndConversation) {
-            urlBuilder.appendQueryParameter("confirmEndConversation", "true")
-        }
-        if (options.confirmEndConversationMode == EndConversationConfirmationMode.LIVE_CHAT) {
-            urlBuilder.appendQueryParameter(
-                "confirmEndConversationMode",
-                options.confirmEndConversationMode.value
-            )
-        }
-        if (options.footerEndConversationButton) {
-            urlBuilder.appendQueryParameter("footerEndConversationButton", "true")
-        }
-        if (options.canStartNewChat) {
-            urlBuilder.appendQueryParameter("canStartNewChat", "true")
-        }
-        if (!options.initialUserMessage.isNullOrEmpty()) {
-            urlBuilder.appendQueryParameter("initialUserMessage", options.initialUserMessage)
-        }
-        if (options.startAtTop) {
-            urlBuilder.appendQueryParameter("startAtTop", "true")
-        }
-        if (options.showScrollToBottom) {
-            urlBuilder.appendQueryParameter("showScrollToBottom", "true")
-        }
-        if (options.pinDisclosure) {
-            urlBuilder.appendQueryParameter("pinDisclosure", "true")
-        }
-        if (options.disclosurePlacement != DisclosurePlacement.CONVERSATION) {
-            urlBuilder.appendQueryParameter(
-                "disclosurePlacement",
-                options.disclosurePlacement.value
-            )
-        }
-        if (options.removeInputDivider) {
-            urlBuilder.appendQueryParameter("removeInputDivider", "true")
-        }
-        if (options.useConfiguredChatStrings) {
-            urlBuilder.appendQueryParameter("useConfiguredChatStrings", "true")
-        }
-        if (options.useConfiguredStyle) {
-            urlBuilder.appendQueryParameter("useConfiguredStyle", "true")
-        }
-        if (options.autoDetectChatStrings != null) {
-            urlBuilder.appendQueryParameter(
-                "autoDetectChatStrings",
-                options.autoDetectChatStrings.toString()
-            )
-        }
-        options.textDirection?.let {
-            urlBuilder.appendQueryParameter("textDirection", it.value)
-        }
-        if (!options.userIdentityToken.isNullOrEmpty()) {
-            urlBuilder.appendQueryParameter("userIdentityToken", options.userIdentityToken)
-        }
-        if (!args.conversationState.isNullOrEmpty()) {
-            urlBuilder.appendQueryParameter("state", args.conversationState)
-        }
-        if (options.enableConversationList) {
-            urlBuilder.appendQueryParameter("enableConversationList", "true")
-        }
-        if (options.showConversationListByDefault) {
-            urlBuilder.appendQueryParameter("showConversationListByDefault", "true")
-        }
-        if (options.updateVariablesAndSecretsOnSessionResume) {
-            urlBuilder.appendQueryParameter("updateVariablesAndSecretsOnSessionResume", "true")
-        }
-
-        val url = urlBuilder.build().toString()
-        webView.loadUrl(url)
-    }
-
-    internal fun showWebContent() {
-        if (!::webView.isInitialized || !::loadingSpinner.isInitialized) {
-            return
-        }
-        revealFallbackRunnable?.let { revealHandler.removeCallbacks(it) }
-        revealFallbackRunnable = null
-        if (didRevealContent) {
-            return
-        }
-        didRevealContent = true
-        loadingSpinner.visibility = View.GONE
-        webView.animate().alpha(1f).setDuration(300).start()
-    }
-
-    /**
-     * Keeps the spinner up for a resumed conversation until [showWebContent] is triggered by the
-     * embed's onConversationReady signal. The scheduled fallback guards against older embeds that
-     * never send that signal, so the spinner is not left up indefinitely.
-     */
-    internal fun scheduleRevealFallback() {
-        if (didRevealContent || revealFallbackRunnable != null) {
-            return
-        }
-        val runnable = Runnable { showWebContent() }
-        revealFallbackRunnable = runnable
-        revealHandler.postDelayed(runnable, REVEAL_FALLBACK_MS)
-    }
-
-    internal fun stopLoadingIndicator() {
-        if (!::loadingSpinner.isInitialized) {
-            return
-        }
-        loadingSpinner.visibility = View.GONE
-    }
-
-    private fun restoreStorage(savedInstanceState: Bundle) {
-        val savedStorage = savedInstanceState.getSerializable("storage") as? HashMap<String, String>
-        if (savedStorage != null) {
-            savedStorage.forEach { (key, value) ->
-                storage?.setItem(key, value)
-            }
+        return AgentChatView(
+            context = requireContext(),
+            agentConfig = args.agentConfig,
+            options = args.options,
+            conversationState = args.conversationState,
+            listener = listener,
+            storage = storage,
+            fileChooserLauncher = fileChooserLauncher::launch,
+            onConversationEndedInternal = controller?.let { controller ->
+                { controller.notifyConversationEndedInternal() }
+            },
+            onDispose = controller?.let { controller ->
+                { view -> controller.disconnectFromView(view) }
+            },
+            viewId = View.NO_ID,
+        ).also {
+            chatView = it
+            controller?.connectToView(it)
+            it.initialize(savedInstanceState)
         }
     }
 
     override fun onResume() {
         super.onResume()
-        dispatchAppStatusChange(AppStatus.FOREGROUNDED)
+        chatView?.onHostResume()
     }
 
     override fun onPause() {
         super.onPause()
-        dispatchAppStatusChange(AppStatus.BACKGROUNDED)
-    }
-
-    /**
-     * Called when the embed reports that it is open. Reports the fragment's current app status,
-     * since transitions dispatched while the embed was still loading were dropped.
-     */
-    internal fun onEmbedOpened() {
-        embedOpened = true
-        dispatchAppStatusChange(
-            if (isResumed) AppStatus.FOREGROUNDED else AppStatus.BACKGROUNDED
-        )
-    }
-
-    /**
-     * Reports a foreground/background transition to the embed, which forwards it to the server so
-     * agent code can read `conversation.info.embedAppStatus`. Matches the event the iOS SDK
-     * dispatches, including the local timestamp the server uses to discard stale updates.
-     */
-    private fun dispatchAppStatusChange(status: AppStatus) {
-        if (!::webView.isInitialized || !embedOpened) {
-            return
-        }
-        if (reportedAppStatus == status) {
-            return
-        }
-        reportedAppStatus = status
-        val localTimestampMs = System.currentTimeMillis()
-        webView.evaluateJavascript(
-            "window.dispatchEvent(new CustomEvent('appstatuschange', " +
-                "{ detail: { status: '${status.value}', localTimestampMs: $localTimestampMs } }))",
-            null
-        )
+        chatView?.onHostPause()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
-        webView.saveState(outState)
-        outState.putBoolean("pageLoaded", pageLoaded)
-        val args = arguments?.getParcelable<AgentChatFragmentArgs>("args")
-        if (args != null) {
-            outState.putParcelable("args", args)
-        }
-        val storageData = storage?.getAll()
-        if (storageData != null) {
-            outState.putSerializable("storage", HashMap(storageData))
-        }
+        chatView?.saveState(outState)
     }
 
     override fun onDestroyView() {
+        chatView?.dispose()
+        chatView = null
         super.onDestroyView()
-        revealFallbackRunnable?.let { revealHandler.removeCallbacks(it) }
-        revealFallbackRunnable = null
-        pendingAddAgentTagsCallbacks.values.forEach {
-            revealHandler.removeCallbacks(it.timeout)
-            it.callback(false)
-        }
-        pendingAddAgentTagsCallbacks.clear()
-        didRevealContent = false
-        embedOpened = false
-        reportedAppStatus = null
     }
 
     fun printTranscript() {
-        webView.evaluateJavascript("sierraAndroid.printTranscript()", null)
+        chatView?.printTranscript()
     }
 
     /**
@@ -1071,106 +673,28 @@ class AgentChatFragment : Fragment() {
      * waiting for or connected to a live agent.
      */
     fun endConversation() {
-        webView.evaluateJavascript("sierraAndroid.endConversation()", null)
+        chatView?.endConversation()
     }
 
     fun sendUserAttachment(attachments: List<UserAttachment>) {
-        val payload = serializedAttachments(attachments)
-        webView.evaluateJavascript(
-            "sierraAndroid.sendUserAttachment(JSON.parse($payload))",
-            null
-        )
+        chatView?.sendUserAttachment(attachments)
     }
 
     fun sendUserMessage(message: String, attachments: List<UserAttachment>) {
-        val payload = serializedAttachments(attachments)
-        val messageJSON = JSONObject.quote(message).escapeJsLineSeparators()
-        webView.evaluateJavascript(
-            "sierraAndroid.sendUserMessage($messageJSON, JSON.parse($payload))",
-            null
-        )
+        chatView?.sendUserMessage(message, attachments)
     }
-
-    private fun serializedAttachments(attachments: List<UserAttachment>): String =
-        JSONObject.quote(
-            JSONArray().apply {
-                attachments.forEach { attachment ->
-                    put(attachment.toJSONObject())
-                }
-            }.toString()
-        ).escapeJsLineSeparators()
 
     fun addAgentTags(
         tags: List<String>,
         options: AddAgentTagsOptions,
         callback: (Boolean) -> Unit
     ) {
-        if (Looper.myLooper() != Looper.getMainLooper()) {
-            revealHandler.post { addAgentTags(tags, options, callback) }
-            return
-        }
-
-        if (!::webView.isInitialized) {
-            callback(false)
-            return
-        }
-
-        val callbackId = "addAgentTags_${System.currentTimeMillis()}_${nextAddAgentTagsCallbackID++}"
-        val timeout = Runnable {
-            pendingAddAgentTagsCallbacks.remove(callbackId)?.callback?.invoke(false)
-        }
-        pendingAddAgentTagsCallbacks[callbackId] = PendingAddAgentTags(callback, timeout)
-
-        // Escape U+2028/U+2029 so tag values cannot break the injected JavaScript source.
-        val tagsJSON = JSONObject.quote(JSONArray(tags).toString()).escapeJsLineSeparators()
-        val optionsJSON = options.toJSONObject().toString().escapeJsLineSeparators()
-        webView.evaluateJavascript(
-            """
-            (function() {
-                const finish = function(added) {
-                    window.AndroidSDK.onAddAgentTagsResult(${JSONObject.quote(callbackId)}, Boolean(added));
-                };
-                const fail = function() { finish(false); };
-                const api = window.sierraAndroid;
-                if (!api || typeof api.addAgentTags !== 'function') {
-                    fail();
-                    return;
-                }
-                Promise.resolve()
-                    .then(function() {
-                        return api.addAgentTags(JSON.parse($tagsJSON), $optionsJSON);
-                    })
-                    .then(finish)
-                    .catch(fail);
-            })();
-            """.trimIndent(),
-            null
-        )
-
-        revealHandler.postDelayed(timeout, ADD_AGENT_TAGS_TIMEOUT_MS)
-    }
-
-    internal fun onAddAgentTagsResult(callbackId: String, added: Boolean) {
-        revealHandler.post {
-            val pending = pendingAddAgentTagsCallbacks.remove(callbackId) ?: return@post
-            revealHandler.removeCallbacks(pending.timeout)
-            pending.callback(added)
-        }
+        chatView?.addAgentTags(tags, options, callback) ?: callback(false)
     }
 
     fun showConversationList() {
-        webView.evaluateJavascript("sierraAndroid.showConversationList()", null)
+        chatView?.showConversationList()
     }
-}
-
-private fun generateUserAgent(context: Context): String {
-    val packageInfo = context.packageManager.getPackageInfo(context.packageName, 0)
-    val appVersion = packageInfo.versionName ?: "0"
-    val appName = context.packageName
-    val androidVersion = Build.VERSION.RELEASE
-    val model = Build.MODEL
-
-    return "Sierra-Android-SDK ($appName/$appVersion $model/$androidVersion) WebView"
 }
 
 internal class AgentChatViewModel : ViewModel() {
@@ -1178,329 +702,4 @@ internal class AgentChatViewModel : ViewModel() {
     internal var controller: AgentChatController? = null
 }
 
-private class ChatWebViewClient(
-    private val fragment: AgentChatFragment,
-    private val agentConfig: AgentConfig,
-    private val listener: ConversationEventListener?,
-) : WebViewClient() {
-    private var hadError: Boolean = false
-
-    private fun handleMainUrlLoadFailure(view: WebView?) {
-        view?.loadUrl("about:blank")
-        fragment.pageLoaded = false
-        hadError = true
-        fragment.stopLoadingIndicator()
-        listener?.onConversationInitializationError()
-    }
-
-    override fun onPageFinished(view: WebView?, url: String?) {
-        if (url.toString().startsWith(agentConfig.url) && !hadError) {
-            fragment.pageLoaded = true
-        }
-    }
-
-    @SuppressLint("WebViewClientOnReceivedSslError")
-    override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: SslError?) {
-        if (listener != null) {
-            Log.w(TAG, "Delegating SSL error handling to conversation listener")
-            listener.onReceivedSslError(view, handler, error)
-            return
-        }
-
-        handler?.cancel()
-
-        if (error?.url?.startsWith(agentConfig.url) == true) {
-            handleMainUrlLoadFailure(view)
-        }
-    }
-
-    override fun onReceivedError(
-        view: WebView,
-        request: WebResourceRequest,
-        error: WebResourceError
-    ) {
-        if (request.url.toString().startsWith(agentConfig.url)) {
-            Log.e(TAG, "Received error trying to load the main URL")
-            handleMainUrlLoadFailure(view)
-        }
-    }
-
-    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-        val url = request?.url ?: return false
-        val baseUri = Uri.parse(agentConfig.url)
-
-        if (request.isForMainFrame && (url.host != baseUri.host || url.scheme != baseUri.scheme)) {
-            if (listener?.onLinkClick(url) == true) {
-                return true
-            }
-
-            val intent = Intent(Intent.ACTION_VIEW, url).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) // Ensures it works in non-Activity contexts
-            }
-
-            val context = view?.context ?: return false
-            Handler(Looper.getMainLooper()).post {
-                context.startActivity(intent)
-            }
-            return true
-        }
-        return false
-    }
-}
-
-private class ChatWebViewInterface(
-    private val context: Context,
-    private val storage: ConversationStorage?,
-    private val listener: ConversationEventListener?,
-    private val fragment: AgentChatFragment,
-    private val webView: WebView,
-    private val conversationOptions: ConversationOptions?
-) {
-    private val handler = Handler(Looper.getMainLooper())
-
-    private fun handleOnOpen(isNewConversation: Boolean) {
-        handler.post {
-            fragment.onEmbedOpened()
-            if (isNewConversation) {
-                // New conversation: the greeting is already rendered, so reveal now.
-                fragment.showWebContent()
-            } else {
-                // Resuming an existing conversation: keep the spinner up until the transcript has
-                // rendered (onConversationReady) so we don't flash an empty greeting state. A
-                // fallback guards against older embeds that never send onConversationReady.
-                fragment.scheduleRevealFallback()
-            }
-        }
-        listener?.onOpen(isNewConversation)
-    }
-
-    @JavascriptInterface
-    fun onConversationReady() {
-        handler.post {
-            fragment.showWebContent()
-        }
-    }
-
-    @JavascriptInterface
-    fun onOpen() {
-        handleOnOpen(true)
-    }
-
-    @JavascriptInterface
-    fun onOpen(isNewConversation: Boolean) {
-        handleOnOpen(isNewConversation)
-    }
-
-    @JavascriptInterface
-    fun onTransfer(dataJSONStr: String) {
-        val dataJSON = try {
-            JSONObject(dataJSONStr)
-        } catch (e: JSONException) {
-            Log.e(TAG, "Cannot parse transfer JSON data", e)
-            return
-        }
-        val isSynchronous = dataJSON.optBoolean("isSynchronous")
-        val isContactCenter = dataJSON.optBoolean("isContactCenter")
-        val dataArrayJSON = dataJSON.optJSONArray("data")
-        val dataMap = mutableMapOf<String, String>()
-        if (dataArrayJSON != null) {
-            for (i in 0 until dataArrayJSON.length()) {
-                val item = dataArrayJSON.getJSONObject(i)
-                dataMap[item.getString("key")] = item.getString("value")
-            }
-        }
-
-        val transfer = ConversationTransfer(isSynchronous, isContactCenter, dataMap)
-        listener?.onConversationTransfer(transfer)
-    }
-
-    private fun createWebPrintJob(webView: WebView) {
-        (this.context.getSystemService(Context.PRINT_SERVICE) as? PrintManager)?.let { printManager ->
-            val jobName = "Chat Transcript"
-            val printAdapter = webView.createPrintDocumentAdapter(jobName)
-
-            printManager.print(
-                jobName,
-                printAdapter,
-                PrintAttributes.Builder().build()
-            )
-        }
-    }
-
-    @JavascriptInterface
-    fun onPrint(url: String, data: String) {
-        var heldWebView: WebView? = null
-        fun doWebViewPrint() {
-            // Create a WebView object specifically for printing
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-                WebView.startSafeBrowsing(this.context) {}
-            }
-            val webView = WebView(this.context)
-            // Sierra WebView hardening (CWE-693). Inlined adjacent to the WebView construction so
-            // SAST tools recognize the defenses; do not factor into a helper.
-            webView.settings.allowFileAccess = false
-            @Suppress("DEPRECATION")
-            webView.settings.allowFileAccessFromFileURLs = false
-            @Suppress("DEPRECATION")
-            webView.settings.allowUniversalAccessFromFileURLs = false
-            webView.settings.allowContentAccess = false
-            webView.settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-            webView.webViewClient = object : WebViewClient() {
-                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest) =
-                    false
-
-                override fun onPageFinished(view: WebView, url: String) {
-                    createWebPrintJob(view)
-                    heldWebView = null
-                }
-            }
-
-            webView.postUrl(url, data.toByteArray())
-            // Keep a reference to WebView object until you pass the PrintDocumentAdapter
-            // to the PrintManager
-            heldWebView = webView
-        }
-
-        val handler = Handler(Looper.getMainLooper())
-        handler.post {
-            doWebViewPrint()
-        }
-    }
-
-    @JavascriptInterface
-    fun onConversationStart(conversationID: String) {
-        listener?.onConversationStart(conversationID)
-    }
-
-    @JavascriptInterface
-    fun onAgentMessageEnd() {
-        listener?.onAgentMessageEnd()
-    }
-
-    @JavascriptInterface
-    fun onExternalAgentJoin(externalConversationID: String?, externalAgentID: String?) {
-        listener?.onExternalAgentJoin(externalConversationID, externalAgentID)
-    }
-
-    @JavascriptInterface
-    fun onEndChat() {
-        listener?.onConversationEnded()
-        fragment.controller?.notifyConversationEndedInternal()
-    }
-
-    @JavascriptInterface
-    fun onShowConversationList() {
-        listener?.onShowConversationList()
-    }
-
-    @JavascriptInterface
-    fun onHideConversationList() {
-        listener?.onHideConversationList()
-    }
-
-    @JavascriptInterface
-    fun onAddAgentTagsResult(callbackId: String, added: Boolean) {
-        fragment.onAddAgentTagsResult(callbackId, added)
-    }
-
-    @JavascriptInterface
-    fun storeValue(key: String, value: String) {
-        storage?.setItem(key, value)
-    }
-
-    @JavascriptInterface
-    fun getStoredValue(key: String): String? {
-        return storage?.getItem(key)
-    }
-
-    @JavascriptInterface
-    fun clearStorage() {
-        storage?.clear()
-    }
-
-    /**
-     * Returns the initial agent memory (variables and secrets) as a JSON string. These are
-     * delivered to the web embed via this bridge method instead of URL query parameters, so the
-     * values cannot leak into device, proxy, or analytics logs.
-     */
-    @JavascriptInterface
-    fun getInitialMemory(): String {
-        val memory = JSONObject()
-        val variables = conversationOptions?.variables
-        if (!variables.isNullOrEmpty()) {
-            memory.put("variables", JSONObject(variables))
-        }
-        val secrets = conversationOptions?.secrets
-        if (!secrets.isNullOrEmpty()) {
-            memory.put("secrets", JSONObject(secrets))
-        }
-        return memory.toString()
-    }
-
-    @JavascriptInterface
-    fun onSecretExpiry(secretName: String, callbackId: String) {
-        listener?.onSecretExpiry(secretName) { result ->
-            val jsCode = when (result) {
-                is SecretExpiryResult.Success -> {
-                    val valueJson = if (result.value != null) {
-                        JSONObject.quote(result.value)
-                    } else {
-                        "null"
-                    }
-                    "window.__sierraAndroidResolveCallback(${JSONObject.quote(callbackId)}, $valueJson);"
-                }
-                is SecretExpiryResult.Error -> {
-                    "window.__sierraAndroidResolveCallback(${JSONObject.quote(callbackId)}, null, ${JSONObject.quote(result.message)});"
-                }
-            }
-            handler.post {
-                webView.evaluateJavascript(jsCode, null)
-            }
-        }
-    }
-
-    @JavascriptInterface
-    fun onUserIdentityTokenExpiry(callbackId: String) {
-        listener?.onUserIdentityTokenExpiry { result ->
-            val jsCode = when (result) {
-                is SecretExpiryResult.Success -> {
-                    val valueJson = if (result.value != null) {
-                        JSONObject.quote(result.value)
-                    } else {
-                        "null"
-                    }
-                    "window.__sierraAndroidResolveCallback(${JSONObject.quote(callbackId)}, $valueJson);"
-                }
-                is SecretExpiryResult.Error -> {
-                    "window.__sierraAndroidResolveCallback(${JSONObject.quote(callbackId)}, null, ${JSONObject.quote(result.message)});"
-                }
-            }
-            handler.post {
-                webView.evaluateJavascript(jsCode, null)
-            }
-        }
-    }
-}
-
 private const val TAG = "AgentChatController"
-
-/**
- * How long to keep the spinner up for a resumed conversation while waiting for
- * onConversationReady. Only reached when the embed does not send that signal (e.g. an older embed
- * build); the normal path reveals as soon as the transcript has rendered.
- */
-private const val REVEAL_FALLBACK_MS = 10_000L
-private const val ADD_AGENT_TAGS_TIMEOUT_MS = 30_000L
-
-/** Values must stay in sync with the iOS SDK and the server's EmbedBotAppStatus enum. */
-private enum class AppStatus(val value: String) {
-    FOREGROUNDED("FOREGROUNDED"),
-    BACKGROUNDED("BACKGROUNDED"),
-}
-
-/**
- * U+2028 and U+2029 are valid in JSON strings but line terminators in JavaScript source, so JSON
- * embedded in an evaluateJavascript payload must escape them to keep the script parseable.
- */
-private fun String.escapeJsLineSeparators(): String =
-    replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")

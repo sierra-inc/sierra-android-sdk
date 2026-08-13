@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Copyright Sierra -->
+<resources>
+    <!--
+      Stable id for AgentChatView. Android's view-state saving skips any view whose id is unset, so
+      without this the view's own onSaveInstanceState/onRestoreInstanceState can never run and every
+      host has to save and restore chat state by hand.
+    -->
+    <item name="sierra_agent_chat_view" type="id" />
+</resources>
