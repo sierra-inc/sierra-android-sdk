@@ -261,9 +261,7 @@ internal class VoiceSessionManager(
         val requestBuilder = Request.Builder()
             .url(wsURL)
             .header("User-Agent", generateVoiceUserAgent(AppContextHolder.applicationContext))
-        if (!config.headlessAPIToken.isNullOrEmpty()) {
-            requestBuilder.header("Authorization", "Bearer ${config.headlessAPIToken}")
-        }
+        applySvpAuthentication(requestBuilder, config)
 
         webSocket = okHttpClient.newWebSocket(requestBuilder.build(), object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -940,6 +938,20 @@ internal class VoiceSessionManager(
         echoGateAboveCount = 0
         echoGateBelowCount = 0
         echoGateFloorRms = echoGateInitialFloorRms
+    }
+}
+
+internal fun applySvpAuthentication(
+    requestBuilder: Request.Builder,
+    config: AgentConfig
+) {
+    val oauthAccessToken = config.oauthAccessToken
+    val headlessAPIToken = config.headlessAPIToken
+    if (!oauthAccessToken.isNullOrEmpty()) {
+        requestBuilder.header("Authorization", "Bearer $oauthAccessToken")
+        requestBuilder.header("X-Sierra-Token-Version", "2")
+    } else if (!headlessAPIToken.isNullOrEmpty()) {
+        requestBuilder.header("Authorization", "Bearer $headlessAPIToken")
     }
 }
 

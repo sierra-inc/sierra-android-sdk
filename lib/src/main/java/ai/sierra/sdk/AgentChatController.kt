@@ -335,20 +335,29 @@ data class AgentChatControllerOptions(
     var messageLabelPlacement: MessageLabelPlacement = MessageLabelPlacement.DEFAULT,
 
     /**
-     * Explicitly set whether or not to auto-detect locale-specific chat strings and text direction
-     * from the conversation locale.
+     * Whether chat interface strings (button labels, tooltips, etc.) and text direction are
+     * automatically localized from the conversation locale at the start of the conversation.
+     * When null and useConfiguredChatStrings is true, the server-configured value is used.
      */
     var autoDetectChatStrings: Boolean? = null,
 
     /**
-     * Explicitly set the text direction of the chat window.
+     * Whether chat interface strings (button labels, tooltips, etc.) and text direction are
+     * automatically updated when the agent changes the conversation locale mid-conversation.
+     * When null and useConfiguredChatStrings is true, the server-configured value is used.
+     */
+    var autoUpdateChatStrings: Boolean? = null,
+
+    /**
+     * Explicitly set the text direction of the chat window, taking precedence over
+     * autoDetectChatStrings and autoUpdateChatStrings:
      * - `LTR`: Forces the chat window to use a left-to-right language layout.
      * - `RTL`: Forces the chat window to use a right-to-left language layout.
-     * - `AUTO`: Text direction is automatically configured from the conversation locale.
-     * When null, automatically determined from locale if auto-detection is active --
-     * either via [autoDetectChatStrings] or the server's Agent Studio configuration
-     * when [useConfiguredChatStrings] is true. Otherwise falls back to the server
-     * value when [useConfiguredChatStrings] is true, or left-to-right.
+     * - `AUTO`: Text direction automatically follows the conversation locale.
+     * When null, text direction follows the conversation locale if autoDetectChatStrings is
+     * active or once autoUpdateChatStrings applies a mid-conversation locale change.
+     * Otherwise, follows the Agent Studio "Text direction" setting if
+     * useConfiguredChatStrings is true; otherwise defaults to left-to-right.
      */
     var textDirection: TextDirection? = null,
 
@@ -392,7 +401,8 @@ data class AgentChatControllerOptions(
     }
 
     internal fun shouldOmitDefaultChatStrings(): Boolean {
-        return autoDetectChatStrings == true || useConfiguredChatStrings
+        return autoDetectChatStrings == true || autoUpdateChatStrings == true ||
+            useConfiguredChatStrings
     }
 
     internal fun shouldUseGreetingMessageAsCustomGreeting(): Boolean {

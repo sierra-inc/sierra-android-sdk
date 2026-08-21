@@ -44,6 +44,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
+import androidx.activity.OnBackPressedCallback
 import androidx.annotation.ColorInt
 import androidx.annotation.DrawableRes
 import androidx.annotation.FontRes
@@ -400,6 +401,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         get() = controller?.agent?.config ?: parceledArgs.agentConfig
     private val options: AgentVoiceControllerOptions
         get() = controller?.options ?: parceledArgs.options
+    private lateinit var rootContainer: FrameLayout
     private lateinit var rootLayout: LinearLayout
     private lateinit var contentContainer: FrameLayout
     private lateinit var placeholderContainer: LinearLayout
@@ -452,6 +454,16 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
     private val placeholderWaveformIconSizeDp = 40
 
     private var rendererView: MobileRendererView? = null
+    private var isRendererFullscreen = false
+    private val rendererFullscreenBackCallback = object : OnBackPressedCallback(false) {
+        override fun handleOnBackPressed() {
+            // Native owns the outer layout, so collapse it synchronously. The JS
+            // request is best-effort and cannot trap the user if the renderer is
+            // hung or destroyed.
+            setRendererFullscreen(false)
+            rendererView?.requestInlineDisplayMode {}
+        }
+    }
     private var voiceSession: VoiceSessionManager? = null
     private var secretRefreshOrchestrator: SecretRefreshOrchestrator? = null
     private var hasShownFirstAttachment = false
@@ -493,6 +505,12 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
     ): View {
         AppContextHolder.applicationContext = requireContext().applicationContext
 
+        rootContainer = FrameLayout(requireContext()).apply {
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
         rootLayout = LinearLayout(requireContext()).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = ViewGroup.LayoutParams(
@@ -512,13 +530,24 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
             1f
         ))
         rootLayout.addView(createBottomControls())
+        rootContainer.addView(
+            rootLayout,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
 
         showLoadingState(true)
-        return rootLayout
+        return rootContainer
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+        requireActivity().onBackPressedDispatcher.addCallback(
+            viewLifecycleOwner,
+            rendererFullscreenBackCallback
+        )
         if (
             ContextCompat.checkSelfPermission(
                 requireContext(),
@@ -544,6 +573,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         cancelInitialGreetingFallback()
         cancelTextComposerKeyboardCallbacks()
         shutdownVoiceSessionIfNeeded()
+        setRendererFullscreen(false)
         rendererView?.destroy()
         rendererView = null
         super.onDestroyView()
@@ -1235,6 +1265,36 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         )
     }
 
+    private fun setRendererFullscreen(fullscreen: Boolean) {
+        if (fullscreen == isRendererFullscreen) {
+            return
+        }
+        val renderer = rendererView ?: return
+        val visibility = renderer.visibility
+        (renderer.parent as? ViewGroup)?.removeView(renderer)
+        if (fullscreen) {
+            rootContainer.addView(
+                renderer,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            )
+            renderer.bringToFront()
+        } else {
+            contentContainer.addView(
+                renderer,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            )
+        }
+        renderer.visibility = visibility
+        isRendererFullscreen = fullscreen
+        rendererFullscreenBackCallback.isEnabled = fullscreen
+    }
+
     private fun showLoadingState(visible: Boolean) {
         loadingIndicator.visibility = if (visible) View.VISIBLE else View.GONE
         placeholderCenterVisual?.view?.visibility = if (visible) View.GONE else View.VISIBLE
@@ -1595,8 +1655,13 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
     }
 
     override fun onMobileRendererError(error: Throwable) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { onMobileRendererError(error) }
+            return
+        }
         Log.e(VOICE_TAG, "Renderer error", error)
         rendererFailed = true
+        setRendererFullscreen(false)
         rendererView?.visibility = View.GONE
         placeholderContainer.visibility = View.VISIBLE
     }
@@ -1622,6 +1687,10 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         } catch (e: Throwable) {
             Log.w(VOICE_TAG, "Failed to start activity for external URL", e)
         }
+    }
+
+    override fun onDisplayModeChanged(displayMode: MobileRendererDisplayMode) {
+        setRendererFullscreen(displayMode == MobileRendererDisplayMode.FULLSCREEN)
     }
 
     private fun canonicalizeForSignature(value: Any?): String {
