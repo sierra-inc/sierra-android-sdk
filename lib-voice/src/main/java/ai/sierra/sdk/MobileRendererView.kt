@@ -21,6 +21,7 @@ import android.widget.FrameLayout
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
+import java.util.UUID
 
 /**
  * Shapes posted by the mobile renderer web bundle use `attachments` (array). Older bundles may send
@@ -50,6 +51,12 @@ internal interface MobileRendererDelegate {
     fun onSVPClientEvent(text: String, attachments: List<Map<String, Any?>>)
     fun onMobileRendererError(error: Throwable)
     fun onLinkClick(url: Uri)
+    fun onDisplayModeChanged(displayMode: MobileRendererDisplayMode)
+}
+
+internal enum class MobileRendererDisplayMode {
+    INLINE,
+    FULLSCREEN
 }
 
 internal class MobileRendererView(
@@ -61,6 +68,7 @@ internal class MobileRendererView(
 ) : FrameLayout(context) {
     private val webView: WebView
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val nativeBridgeToken = UUID.randomUUID().toString()
     // The state below is main-thread only: pushes post through mainHandler, JS bridge callbacks
     // re-post to mainHandler, and WebView.evaluateJavascript callbacks land on the UI thread.
     // Keep all reads/writes on the main thread so no additional synchronization is needed.
@@ -123,6 +131,8 @@ internal class MobileRendererView(
             builder.appendQueryParameter("enableLiveTranscription", "true")
         }
         builder.appendQueryParameter("supportsLinkClick", "true")
+        builder.appendQueryParameter("supportsFullscreen", "true")
+        builder.appendQueryParameter("nativeBridgeToken", nativeBridgeToken)
         webView.loadUrl(builder.build().toString())
     }
 
@@ -242,6 +252,20 @@ internal class MobileRendererView(
         pending.forEach { enqueueConversationEvent(it) }
     }
 
+    fun requestInlineDisplayMode(onComplete: (Boolean) -> Unit) {
+        val js = """
+            (function() {
+              const fn = window.sierraMobile && window.sierraMobile.requestInlineDisplayMode;
+              return typeof fn === 'function' ? fn() : false;
+            })();
+        """.trimIndent()
+        webView.evaluateJavascript(js) { result ->
+            if (!isDestroyed) {
+                onComplete(result == "true")
+            }
+        }
+    }
+
     fun destroy() {
         isDestroyed = true
         isReady = false
@@ -304,6 +328,23 @@ internal class MobileRendererView(
                     return@post
                 }
                 delegate.onLinkClick(parsed)
+            }
+        }
+
+        @JavascriptInterface
+        fun onDisplayModeChanged(displayMode: String?, bridgeToken: String?) {
+            if (bridgeToken != nativeBridgeToken) {
+                return
+            }
+            val normalized = when (displayMode) {
+                "inline" -> MobileRendererDisplayMode.INLINE
+                "fullscreen" -> MobileRendererDisplayMode.FULLSCREEN
+                else -> return
+            }
+            mainHandler.post {
+                if (!isDestroyed) {
+                    delegate.onDisplayModeChanged(normalized)
+                }
             }
         }
     }
