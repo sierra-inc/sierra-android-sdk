@@ -430,6 +430,12 @@ class AgentChatView internal constructor(
                 options.autoDetectChatStrings.toString(),
             )
         }
+        if (options.autoUpdateChatStrings != null) {
+            urlBuilder.appendQueryParameter(
+                "autoUpdateChatStrings",
+                options.autoUpdateChatStrings.toString(),
+            )
+        }
         options.textDirection?.let {
             urlBuilder.appendQueryParameter("textDirection", it.value)
         }

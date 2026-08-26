@@ -5,6 +5,7 @@ package ai.sierra.sdk
 
 import android.content.Context
 import android.os.Parcelable
+import kotlinx.parcelize.IgnoredOnParcel
 import kotlinx.parcelize.Parcelize
 
 /**
@@ -21,8 +22,19 @@ data class AgentConfig(
     val target: String? = null,
     var apiHost: AgentAPIHost = AgentAPIHost.PROD,
     val persistence: PersistenceMode = PersistenceMode.MEMORY,
-    /** Headless API token required for SVP voice connections. Not needed for chat. */
-    val headlessAPIToken: String? = null
+    /**
+     * Headless API token used for SVP voice connections. Set either this or [oauthAccessToken],
+     * never both. Not needed for chat.
+     */
+    val headlessAPIToken: String? = null,
+    /**
+     * Short-lived OAuth access token with the Voice scope used for SVP voice connections. Set
+     * either this or [headlessAPIToken], never both. Have your backend exchange the OAuth client
+     * configured in Agent Studio; do not embed its secret. This token is not saved in Android
+     * fragment state; mint a fresh token when recreating a controller after process death.
+     */
+    @IgnoredOnParcel
+    val oauthAccessToken: String? = null
 ): Parcelable {
     internal val url get() = "${apiHost.embedBaseURL}/agent/${token}/mobile"
 }
