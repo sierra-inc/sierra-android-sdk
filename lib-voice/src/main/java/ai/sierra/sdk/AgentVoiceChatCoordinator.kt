@@ -79,6 +79,8 @@ public class AgentVoiceChatCoordinator(
     // True when the pending switch was agent-initiated (vs a manual "Continue in chat" tap); the
     // seeded chat state then drives the agent on resume instead of switching silently.
     private val pendingAgentHandoff = AtomicBoolean(false)
+    // A new voice ID also lacks a token initially, so only persisted incomplete state is stale.
+    private var hasIncompletePersistedResumeState = false
 
     init {
         restorePersistedConversationState()
@@ -96,11 +98,21 @@ public class AgentVoiceChatCoordinator(
         voiceOptions.compactEndCallButtonProvider = options.voiceOptions.compactEndCallButtonProvider
         voiceOptions.textComposerViewProvider = options.voiceOptions.textComposerViewProvider
         voiceOptions.voiceOkHttpClientCustomizer = options.voiceOptions.voiceOkHttpClientCustomizer
-        val shouldResumeConversation =
-            voiceConversationID != null ||
-                (voiceOptions.resumeConversation && voiceOptions.voiceConversationID != null)
+        val configuredVoiceConversationID = voiceOptions.voiceConversationID
+        val configuredIDChanged =
+            configuredVoiceConversationID != null &&
+                configuredVoiceConversationID != voiceConversationID
+        val hasIncompleteResumeState = hasIncompletePersistedResumeState
+        val configuredIDMatchesIncompleteResumeState =
+            hasIncompleteResumeState && configuredVoiceConversationID == voiceConversationID
+        val nextConfiguredVoiceConversationID =
+            if (configuredIDMatchesIncompleteResumeState) null else configuredVoiceConversationID
+        if (configuredIDChanged || hasIncompleteResumeState) {
+            resetConversation()
+        }
+        val shouldResumeConversation = voiceConversationID != null && voiceResumeToken != null
         val nextVoiceConversationID =
-            voiceConversationID ?: voiceOptions.voiceConversationID ?: UUID.randomUUID().toString()
+            voiceConversationID ?: nextConfiguredVoiceConversationID ?: UUID.randomUUID().toString()
         voiceConversationID = nextVoiceConversationID
 
         voiceOptions.voiceConversationID = nextVoiceConversationID
@@ -123,11 +135,15 @@ public class AgentVoiceChatCoordinator(
         // The voice switch action sets this latch immediately before asking the host to present
         // chat. The first chat controller after that transition seeds storage, then clears it so
         // normal chat openings do not overwrite current state.
-        if (pendingContinueInChat.compareAndSet(true, false)) {
+        val isVoiceToChatHandoff = pendingContinueInChat.compareAndSet(true, false)
+        if (isVoiceToChatHandoff) {
             seedChatContinuationStateIfAvailable(pendingAgentHandoff.getAndSet(false))
         }
 
-        val chatOptions = options.chatOptions.copy()
+        val chatOptions = options.chatOptions.copy(
+            showConversationListByDefault =
+                options.chatOptions.showConversationListByDefault && !isVoiceToChatHandoff,
+        )
         // data class copy() only carries primary-constructor params; preserve and re-set the
         // @IgnoredOnParcel body properties below.
         chatOptions.conversationEventListener = options.chatOptions.conversationEventListener
@@ -141,6 +157,7 @@ public class AgentVoiceChatCoordinator(
         conversationID = null
         encryptionKey = null
         voiceResumeToken = null
+        hasIncompletePersistedResumeState = false
         pendingContinueInChat.set(false)
         pendingAgentHandoff.set(false)
         agent.resetConversation()
@@ -183,6 +200,7 @@ public class AgentVoiceChatCoordinator(
 
     override fun onResumeTokenReceived(token: String) {
         this.voiceResumeToken = token
+        hasIncompletePersistedResumeState = false
     }
 
     private fun handleSwitchToChat(agentInitiated: Boolean) {
@@ -222,14 +240,17 @@ public class AgentVoiceChatCoordinator(
 
     private fun restorePersistedConversationState() {
         val state = loadPersistedConversationState() ?: return
+        val persistedVoiceConversationID =
+            state.optString("voiceConversationID").takeIf { it.isNotEmpty() }
         conversationID = state.optString("conversationID").takeIf { it.isNotEmpty() }
         encryptionKey = state.optString("encryptionKey").takeIf { it.isNotEmpty() }
         if (voiceConversationID == null) {
-            voiceConversationID = state.optString("voiceConversationID").takeIf { it.isNotEmpty() }
+            voiceConversationID = persistedVoiceConversationID
         }
         if (voiceResumeToken == null) {
             voiceResumeToken = state.optString("voiceResumeToken").takeIf { it.isNotEmpty() }
         }
+        hasIncompletePersistedResumeState = voiceConversationID != null && voiceResumeToken == null
     }
 
     private fun loadPersistedConversationState(): JSONObject? {

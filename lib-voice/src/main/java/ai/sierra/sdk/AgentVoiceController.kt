@@ -165,7 +165,19 @@ public data class AgentVoiceControllerOptions(
     var voiceStyle: AgentVoiceStyle = AgentVoiceStyle(),
     var voicePlaceholderText: String = "How can I help you today?",
     var locale: String = Locale.getDefault().toLanguageTag(),
+    /**
+     * An optional external conversation ID supplied by the host app for a new voice conversation.
+     * Use a unique value of at most 256 UTF-8 bytes for each new conversation. Reusing an external
+     * ID does not resume a prior voice session. Use [AgentVoiceChatCoordinator] to continue an
+     * existing voice and chat conversation; it manages the required resume state. When null, the
+     * SDK generates a conversation ID.
+     */
     var voiceConversationID: String? = null,
+    /**
+     * Requests resume only when the SDK also supplies the server-issued resume token.
+     * [AgentVoiceChatCoordinator] manages this state; setting this directly without the token does
+     * not resume a prior voice session.
+     */
     var resumeConversation: Boolean = false,
     var voiceAgentParameters: HashMap<String, String>? = null,
     var disableInterruptions: Boolean = false,

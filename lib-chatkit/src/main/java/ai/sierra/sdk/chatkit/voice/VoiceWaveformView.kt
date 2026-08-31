@@ -201,12 +201,11 @@ public class VoiceWaveformView @JvmOverloads constructor(
         val originX = (width - totalWidth) / 2f
         val centerY = height / 2f
 
-        // The two rows share a layer so the user row's blend has the agent row as its backdrop.
-        val layer = canvas.saveLayer(0f, 0f, width.toFloat(), height.toFloat(), null)
+        // The view background is already on this canvas, so the user row blends against both it and
+        // the agent row.
         drawRow(canvas, smoothedAgentLevels, reversed = false, paint = agentPaint, originX = originX, centerY = centerY)
         // The user's row runs in the opposite direction so the two spectra fan out from the middle.
         drawRow(canvas, smoothedUserLevels, reversed = true, paint = userPaint, originX = originX, centerY = centerY)
-        canvas.restoreToCount(layer)
     }
 
     private fun drawRow(

@@ -10,7 +10,6 @@ import android.net.http.SslError
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
-import android.webkit.JavascriptInterface
 import android.webkit.SslErrorHandler
 import android.webkit.WebSettings
 import android.webkit.WebResourceError
@@ -18,10 +17,12 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
+import androidx.webkit.WebMessageCompat
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
-import java.util.UUID
 
 /**
  * Shapes posted by the mobile renderer web bundle use `attachments` (array). Older bundles may send
@@ -59,6 +60,55 @@ internal enum class MobileRendererDisplayMode {
     FULLSCREEN
 }
 
+internal class MobileRendererMessageBoundary(
+    private val allowedOrigin: String,
+    private val onOpen: () -> Unit,
+    private val onSVPClientEvent: (String, List<Map<String, Any?>>) -> Unit,
+    private val onError: (Throwable) -> Unit,
+    private val onLinkClick: (String) -> Unit,
+    private val onDisplayModeChanged: (MobileRendererDisplayMode) -> Unit
+) {
+    fun onPostMessage(data: String, sourceOrigin: String, isMainFrame: Boolean) {
+        if (!isMainFrame || sourceOrigin != allowedOrigin) {
+            return
+        }
+        val message = try {
+            JSONObject(data)
+        } catch (error: JSONException) {
+            onError(error)
+            return
+        }
+        when (message.optString("type")) {
+            "onOpen" -> onOpen()
+            "onSVPClientEvent" -> {
+                val text = message.optString("text", "")
+                val attachments = svpClientEventAttachments(message)
+                if (text.isNotEmpty() || attachments.isNotEmpty()) {
+                    onSVPClientEvent(text, attachments)
+                }
+            }
+            "onError" -> {
+                val reason = message.optString("reason", "unknown-renderer-error")
+                onError(IllegalStateException(reason))
+            }
+            "onLinkClick" -> {
+                val url = message.optString("url")
+                if (url.isNotEmpty()) {
+                    onLinkClick(url)
+                }
+            }
+            "onDisplayModeChanged" -> {
+                val displayMode = when (message.optString("displayMode")) {
+                    "inline" -> MobileRendererDisplayMode.INLINE
+                    "fullscreen" -> MobileRendererDisplayMode.FULLSCREEN
+                    else -> return
+                }
+                onDisplayModeChanged(displayMode)
+            }
+        }
+    }
+}
+
 internal class MobileRendererView(
     context: Context,
     private val agentConfig: AgentConfig,
@@ -68,9 +118,17 @@ internal class MobileRendererView(
 ) : FrameLayout(context) {
     private val webView: WebView
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val nativeBridgeToken = UUID.randomUUID().toString()
-    // The state below is main-thread only: pushes post through mainHandler, JS bridge callbacks
-    // re-post to mainHandler, and WebView.evaluateJavascript callbacks land on the UI thread.
+    private val rendererOrigin = Uri.parse(agentConfig.apiHost.embedBaseURL)
+    private val messageBoundary = MobileRendererMessageBoundary(
+        allowedOrigin = rendererOrigin.toString(),
+        onOpen = ::handleRendererOpen,
+        onSVPClientEvent = delegate::onSVPClientEvent,
+        onError = delegate::onMobileRendererError,
+        onLinkClick = { delegate.onLinkClick(Uri.parse(it)) },
+        onDisplayModeChanged = delegate::onDisplayModeChanged
+    )
+    // The state below is main-thread only: pushes and web messages post through mainHandler, and
+    // WebView.evaluateJavascript callbacks land on the UI thread.
     // Keep all reads/writes on the main thread so no additional synchronization is needed.
     private var isReady = false
     private var isDestroyed = false
@@ -87,12 +145,13 @@ internal class MobileRendererView(
         }
         webView = WebView(context)
         addView(webView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
-        setupWebView()
-        loadRendererPage()
+        if (setupWebView()) {
+            loadRendererPage()
+        }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private fun setupWebView() {
+    private fun setupWebView(): Boolean {
         // Keep renderer content hidden until the JS bridge reports it's ready, so
         // users do not see transient web "Loading..." states.
         webView.alpha = 0f
@@ -110,10 +169,32 @@ internal class MobileRendererView(
         webView.settings.allowContentAccess = false
         webView.settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
         webView.webViewClient = MobileRendererWebViewClient(agentConfig, conversationEventListener, delegate)
-        webView.addJavascriptInterface(RendererBridge(), "AndroidSDK")
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
+            delegate.onMobileRendererError(
+                UnsupportedOperationException("WebView does not support secure renderer messages")
+            )
+            return false
+        }
+        WebViewCompat.addWebMessageListener(
+            webView,
+            ANDROID_BRIDGE_NAME,
+            setOf(rendererOrigin.toString())
+        ) { _, message, sourceOrigin, isMainFrame, _ ->
+            if (message.type == WebMessageCompat.TYPE_STRING) {
+                val data = message.data
+                if (data != null) {
+                    mainHandler.post {
+                        if (!isDestroyed) {
+                            messageBoundary.onPostMessage(data, sourceOrigin.toString(), isMainFrame)
+                        }
+                    }
+                }
+            }
+        }
         if (agentConfig.apiHost == AgentAPIHost.LOCAL) {
             WebView.setWebContentsDebuggingEnabled(true)
         }
+        return true
     }
 
     private fun loadRendererPage() {
@@ -132,7 +213,6 @@ internal class MobileRendererView(
         }
         builder.appendQueryParameter("supportsLinkClick", "true")
         builder.appendQueryParameter("supportsFullscreen", "true")
-        builder.appendQueryParameter("nativeBridgeToken", nativeBridgeToken)
         webView.loadUrl(builder.build().toString())
     }
 
@@ -275,81 +355,22 @@ internal class MobileRendererView(
         pendingConversationEvents.clear()
         queuedConversationEvents.clear()
         webView.stopLoading()
-        webView.removeJavascriptInterface("AndroidSDK")
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
+            WebViewCompat.removeWebMessageListener(webView, ANDROID_BRIDGE_NAME)
+        }
         removeView(webView)
         webView.destroy()
     }
 
-    private inner class RendererBridge {
-        @JavascriptInterface
-        fun onOpen() {
-            mainHandler.post {
-                if (isDestroyed) {
-                    return@post
-                }
-                isReady = true
-                webView.alpha = 1f
-                flushPendingConversationEvents()
-                flushPending()
-            }
-        }
-
-        @JavascriptInterface
-        fun onSVPClientEvent(dataJSONStr: String) {
-            try {
-                val json = JSONObject(dataJSONStr)
-                val text = json.optString("text", "")
-                val attachments = svpClientEventAttachments(json)
-                if (text.isEmpty() && attachments.isEmpty()) {
-                    return
-                }
-                delegate.onSVPClientEvent(text, attachments)
-            } catch (e: JSONException) {
-                delegate.onMobileRendererError(e)
-            }
-        }
-
-        @JavascriptInterface
-        fun onError(reason: String?) {
-            val message = reason ?: "unknown-renderer-error"
-            delegate.onMobileRendererError(IllegalStateException(message))
-        }
-
-        @JavascriptInterface
-        fun onLinkClick(url: String?) {
-            val raw = url ?: return
-            val parsed = try {
-                Uri.parse(raw)
-            } catch (_: Throwable) {
-                return
-            }
-            mainHandler.post {
-                if (isDestroyed) {
-                    return@post
-                }
-                delegate.onLinkClick(parsed)
-            }
-        }
-
-        @JavascriptInterface
-        fun onDisplayModeChanged(displayMode: String?, bridgeToken: String?) {
-            if (bridgeToken != nativeBridgeToken) {
-                return
-            }
-            val normalized = when (displayMode) {
-                "inline" -> MobileRendererDisplayMode.INLINE
-                "fullscreen" -> MobileRendererDisplayMode.FULLSCREEN
-                else -> return
-            }
-            mainHandler.post {
-                if (!isDestroyed) {
-                    delegate.onDisplayModeChanged(normalized)
-                }
-            }
-        }
+    private fun handleRendererOpen() {
+        isReady = true
+        webView.alpha = 1f
+        flushPendingConversationEvents()
+        flushPending()
     }
 
     private companion object {
+        const val ANDROID_BRIDGE_NAME = "AndroidSDK"
         const val CONVERSATION_EVENT_FLUSH_DELAY_MS = 16L
         const val CONVERSATION_EVENT_RETRY_DELAY_MS = 250L
         const val MAX_CONVERSATION_EVENT_FLUSH_FAILURES = 3
