@@ -111,6 +111,7 @@ internal class VoiceSessionManager(
     private val disableInterruptions: Boolean = false,
     private val localeTag: String = Locale.getDefault().toLanguageTag(),
     private val agentParameters: Map<String, String> = emptyMap(),
+    private val userIdentityToken: String? = null,
     customizeOkHttpClient: ((OkHttpClient.Builder) -> Unit)? = null,
     private val enableText: Boolean = true,
     private val forwardAgentAttachments: Boolean = true,
@@ -190,7 +191,7 @@ internal class VoiceSessionManager(
     private var automaticGainControl: AutomaticGainControl? = null
 
     private val sampleRate = 24000
-    private val compatibilityDate = "2026-05-07"
+    private val compatibilityDate = "2026-08-27"
 
     // One read off the recorder, sized to keep analyser updates near the Web SDK's display cadence
     // rather than using the recorder's whole buffer. Everything downstream is driven per read --
@@ -395,6 +396,15 @@ internal class VoiceSessionManager(
     }
 
     private fun sendOpen() {
+        sendJSON(
+            JSONObject()
+                .put("type", "open")
+                .put("msgNum", nextMsgNum())
+                .put("subMsg", buildOpenSubMessage())
+        )
+    }
+
+    internal fun buildOpenSubMessage(): JSONObject {
         val subMsg = JSONObject()
             .put("compatibilityDate", compatibilityDate)
             .put("conversationId", conversationId)
@@ -416,12 +426,10 @@ internal class VoiceSessionManager(
         if (agentParameters.isNotEmpty()) {
             subMsg.put("agentParameters", JSONObject(agentParameters))
         }
-        sendJSON(
-            JSONObject()
-                .put("type", "open")
-                .put("msgNum", nextMsgNum())
-                .put("subMsg", subMsg)
-        )
+        if (!userIdentityToken.isNullOrEmpty()) {
+            subMsg.put("userIdentityToken", userIdentityToken)
+        }
+        return subMsg
     }
 
     private fun sendAudioClient(audioData: ByteArray) {

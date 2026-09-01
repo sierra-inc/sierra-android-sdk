@@ -98,6 +98,9 @@ public class AgentVoiceChatCoordinator(
         voiceOptions.compactEndCallButtonProvider = options.voiceOptions.compactEndCallButtonProvider
         voiceOptions.textComposerViewProvider = options.voiceOptions.textComposerViewProvider
         voiceOptions.voiceOkHttpClientCustomizer = options.voiceOptions.voiceOkHttpClientCustomizer
+        if (voiceOptions.userIdentityToken.isNullOrEmpty()) {
+            voiceOptions.userIdentityToken = options.chatOptions.userIdentityToken
+        }
         val configuredVoiceConversationID = voiceOptions.voiceConversationID
         val configuredIDChanged =
             configuredVoiceConversationID != null &&
@@ -143,6 +146,8 @@ public class AgentVoiceChatCoordinator(
         val chatOptions = options.chatOptions.copy(
             showConversationListByDefault =
                 options.chatOptions.showConversationListByDefault && !isVoiceToChatHandoff,
+            userIdentityToken = options.chatOptions.userIdentityToken
+                .takeUnless { it.isNullOrEmpty() } ?: options.voiceOptions.userIdentityToken,
         )
         // data class copy() only carries primary-constructor params; preserve and re-set the
         // @IgnoredOnParcel body properties below.

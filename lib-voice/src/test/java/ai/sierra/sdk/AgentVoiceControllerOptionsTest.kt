@@ -17,7 +17,11 @@ class AgentVoiceControllerOptionsTest {
     @Test
     fun compactControlsAreOptInAndSurviveParcelableRoundTrip() {
         assertFalse(AgentVoiceControllerOptions(name = "Test").useCompactControls)
-        val options = AgentVoiceControllerOptions(name = "Test", useCompactControls = true)
+        val options = AgentVoiceControllerOptions(
+            name = "Test",
+            userIdentityToken = "user-identity-token",
+            useCompactControls = true,
+        )
         val parcel = Parcel.obtain()
 
         try {
@@ -29,6 +33,7 @@ class AgentVoiceControllerOptionsTest {
                 AgentVoiceControllerOptions::class.java.classLoader
             )
             assertTrue(restored?.useCompactControls == true)
+            assertEquals("user-identity-token", restored?.userIdentityToken)
         } finally {
             parcel.recycle()
         }

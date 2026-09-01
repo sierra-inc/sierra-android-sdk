@@ -221,7 +221,9 @@ public data class AgentVoiceControllerOptions(
      */
     var controlsUseEqualWidths: Boolean? = null,
     /** When true, uses compact mute and end-call controls, keeping them beside the text composer. */
-    var useCompactControls: Boolean = false
+    var useCompactControls: Boolean = false,
+    /** A signed JWT that identifies the end user for this voice session. */
+    var userIdentityToken: String? = null
 ) : Parcelable {
     @Deprecated("Use voiceAgentParameters instead.")
     @IgnoredOnParcel
@@ -379,7 +381,8 @@ public class AgentVoiceController(
             ),
             hideTitleBar = options.hideTitleBar,
             voicePlaceholderText = options.greetingMessage,
-            voiceAgentParameters = options.conversationOptions?.secrets?.let { HashMap(it) }
+            voiceAgentParameters = options.conversationOptions?.secrets?.let { HashMap(it) },
+            userIdentityToken = options.userIdentityToken,
         )
     )
 
@@ -643,6 +646,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
             disableInterruptions = isDisableInterruptions,
             localeTag = options.locale,
             agentParameters = agentParameters,
+            userIdentityToken = options.userIdentityToken,
             customizeOkHttpClient = options.voiceOkHttpClientCustomizer,
             enableText = options.enableText,
             forwardAgentAttachments = options.forwardAgentAttachments,

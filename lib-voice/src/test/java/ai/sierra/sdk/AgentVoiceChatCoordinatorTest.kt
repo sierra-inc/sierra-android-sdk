@@ -89,6 +89,47 @@ class AgentVoiceChatCoordinatorTest {
     }
 
     @Test
+    fun sharesChatUserIdentityTokenWithVoice() {
+        val coordinator = AgentVoiceChatCoordinator(
+            agent = Agent(AgentConfig(token = "test-token")),
+            options = AgentVoiceChatCoordinator.Options(
+                voiceOptions = AgentVoiceControllerOptions(name = "Voice"),
+                chatOptions = AgentChatControllerOptions(
+                    name = "Chat",
+                    userIdentityToken = "user-identity-token",
+                ),
+            ),
+        )
+
+        assertEquals(
+            "user-identity-token",
+            coordinator.makeVoiceController().options.userIdentityToken,
+        )
+    }
+
+    @Test
+    fun emptyVoiceUserIdentityTokenFallsBackToChatToken() {
+        val coordinator = AgentVoiceChatCoordinator(
+            agent = Agent(AgentConfig(token = "test-token")),
+            options = AgentVoiceChatCoordinator.Options(
+                voiceOptions = AgentVoiceControllerOptions(
+                    name = "Voice",
+                    userIdentityToken = "",
+                ),
+                chatOptions = AgentChatControllerOptions(
+                    name = "Chat",
+                    userIdentityToken = "user-identity-token",
+                ),
+            ),
+        )
+
+        assertEquals(
+            "user-identity-token",
+            coordinator.makeVoiceController().options.userIdentityToken,
+        )
+    }
+
+    @Test
     fun noConfiguredVoiceConversationIDRestoresPersistedConversation() {
         val agent = Agent(AgentConfig(token = "test-token"))
         persistConversationState(agent, voiceConversationID = "voice-123")
