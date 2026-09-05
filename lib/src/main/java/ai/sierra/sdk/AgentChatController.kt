@@ -426,13 +426,23 @@ data class AgentChatControllerOptions(
  *   instance that should resume that conversation; do not retain it on long-lived
  *   configuration, since reusing the same value after the user starts a new
  *   conversation will cause that new conversation to be replaced by the original one.
+ * @param conversationID Optional external conversation ID associated with an existing
+ *   conversation. Requires [AgentChatControllerOptions.userIdentityToken] for the user associated
+ *   with the conversation. Do not provide both [conversationState] and [conversationID].
  */
 class AgentChatController(
     internal val agent: Agent,
     private val options: AgentChatControllerOptions,
-    private val conversationState: String? = null
+    private val conversationState: String? = null,
+    private val conversationID: String? = null,
 ) {
     private var connectedView: AgentChatView? = null
+
+    constructor(
+        agent: Agent,
+        options: AgentChatControllerOptions,
+        conversationState: String?,
+    ) : this(agent, options, conversationState, null)
 
     fun createFragment(): Fragment {
         return AgentChatFragment().apply {
@@ -442,9 +452,10 @@ class AgentChatController(
                     AgentChatFragmentArgs(
                         agentConfig = agent.config,
                         options = options,
-                        conversationState = conversationState
+                        conversationState = conversationState,
                     )
                 )
+                putString(ARG_CONVERSATION_ID, conversationID)
             }
             listener = MainThreadConversationEventListener(options.conversationEventListener)
             controller = this@AgentChatController
@@ -474,6 +485,7 @@ class AgentChatController(
             agentConfig = agent.config,
             options = options,
             conversationState = conversationState,
+            conversationID = conversationID,
             listener = MainThreadConversationEventListener(options.conversationEventListener),
             storage = agent.getStorage(),
             fileChooserLauncher = fileChooserLauncher,
@@ -548,7 +560,7 @@ class AgentChatController(
 internal data class AgentChatFragmentArgs(
     val agentConfig: AgentConfig,
     val options: AgentChatControllerOptions,
-    val conversationState: String? = null
+    val conversationState: String? = null,
 ) : Parcelable
 
 class AgentChatFragment : Fragment() {
@@ -635,6 +647,7 @@ class AgentChatFragment : Fragment() {
             agentConfig = args.agentConfig,
             options = args.options,
             conversationState = args.conversationState,
+            conversationID = arguments?.getString(ARG_CONVERSATION_ID),
             listener = listener,
             storage = storage,
             fileChooserLauncher = fileChooserLauncher::launch,
@@ -713,3 +726,4 @@ internal class AgentChatViewModel : ViewModel() {
 }
 
 private const val TAG = "AgentChatController"
+private const val ARG_CONVERSATION_ID = "conversationID"

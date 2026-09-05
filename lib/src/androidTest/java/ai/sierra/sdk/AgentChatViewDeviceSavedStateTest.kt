@@ -54,6 +54,7 @@ class AgentChatViewDeviceSavedStateTest {
         agentConfig = AgentConfig(token = "test-token"),
         options = AgentChatControllerOptions(name = "Test Agent"),
         conversationState = null,
+        conversationID = null,
         listener = null,
         storage = null,
         fileChooserLauncher = null,

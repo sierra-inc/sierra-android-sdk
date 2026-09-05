@@ -25,7 +25,8 @@ public class AgentVoiceChatCoordinator(
          * When true, the voice view includes a navigation-bar button that lets the user switch
          * from voice to chat without ending the conversation. On tap, the SVP session is closed
          * with the `continue_in_chat` close reason and the chat view is presented with the
-         * transcript preserved. End and dismissal still terminate the conversation as usual.
+         * transcript preserved. Dismissing the voice view (e.g. back navigation) also closes the
+         * session with `continue_in_chat`, keeping the conversation resumable in chat.
          */
         val canSwitchToChat: Boolean = true,
         /**
@@ -73,14 +74,19 @@ public class AgentVoiceChatCoordinator(
         private set
 
     public var agentEventListener: AgentEventListener? = options.agentEventListener
-    // One-shot handoff latch: set by the voice switch action and consumed by the next
-    // makeChatController() call so only the first chat presentation after handoff seeds storage.
+    // One-shot latch: armed by the voice switch action, a dismissal that seeded continuation
+    // state, or unconsumed seeded state found at init. Consumed by the next makeChatController()
+    // call, which seeds storage and suppresses the conversation list for that first presentation.
     private val pendingContinueInChat = AtomicBoolean(false)
     // True when the pending switch was agent-initiated (vs a manual "Continue in chat" tap); the
     // seeded chat state then drives the agent on resume instead of switching silently.
     private val pendingAgentHandoff = AtomicBoolean(false)
-    // A new voice ID also lacks a token initially, so only persisted incomplete state is stale.
-    private var hasIncompletePersistedResumeState = false
+    // One-shot: armed by the reconnect-to-voice action ([prepareVoiceReconnect]), consumed by the
+    // next makeVoiceController() call. All other voice launches start a new conversation.
+    private val pendingReconnectVoice = AtomicBoolean(false)
+    // Set when the voice session reports an error; the server then treats the call as disconnected
+    // and terminal, so a later dismissal resets instead of seeding chat continuation state.
+    private val voiceSessionErrored = AtomicBoolean(false)
 
     init {
         restorePersistedConversationState()
@@ -101,24 +107,35 @@ public class AgentVoiceChatCoordinator(
         if (voiceOptions.userIdentityToken.isNullOrEmpty()) {
             voiceOptions.userIdentityToken = options.chatOptions.userIdentityToken
         }
+        val isReconnect = pendingReconnectVoice.getAndSet(false)
+        voiceSessionErrored.set(false)
+        // Launching voice supersedes any voice-to-chat handoff the host never presented; drop the
+        // latch so a later chat open doesn't seed a stale resume flag.
+        pendingContinueInChat.set(false)
+        pendingAgentHandoff.set(false)
         val configuredVoiceConversationID = voiceOptions.voiceConversationID
         val configuredIDChanged =
             configuredVoiceConversationID != null &&
                 configuredVoiceConversationID != voiceConversationID
-        val hasIncompleteResumeState = hasIncompletePersistedResumeState
-        val configuredIDMatchesIncompleteResumeState =
-            hasIncompleteResumeState && configuredVoiceConversationID == voiceConversationID
-        val nextConfiguredVoiceConversationID =
-            if (configuredIDMatchesIncompleteResumeState) null else configuredVoiceConversationID
-        if (configuredIDChanged || hasIncompleteResumeState) {
+        if (configuredIDChanged) {
             resetConversation()
         }
-        val shouldResumeConversation = voiceConversationID != null && voiceResumeToken != null
-        val nextVoiceConversationID =
-            voiceConversationID ?: nextConfiguredVoiceConversationID ?: UUID.randomUUID().toString()
-        voiceConversationID = nextVoiceConversationID
+        val shouldResumeConversation =
+            isReconnect && voiceConversationID != null && voiceResumeToken != null
+        if (!shouldResumeConversation) {
+            // Voice resume is an explicit, one-shot reconnect action; every other launch starts a
+            // new voice conversation. Clear the in-memory chat credentials too: they describe the
+            // previous conversation, and a dismissal before this session delivers its own
+            // credentials must not seed them against this launch's voice ID. The previous
+            // conversation stays resumable through persisted storage, which is left untouched
+            // until this session seeds its replacement.
+            voiceConversationID = configuredVoiceConversationID ?: UUID.randomUUID().toString()
+            voiceResumeToken = null
+            conversationID = null
+            encryptionKey = null
+        }
 
-        voiceOptions.voiceConversationID = nextVoiceConversationID
+        voiceOptions.voiceConversationID = voiceConversationID
         voiceOptions.resumeConversation = shouldResumeConversation
         voiceOptions.resumeToken = voiceResumeToken
         if (shouldResumeConversation) {
@@ -127,6 +144,7 @@ public class AgentVoiceChatCoordinator(
         voiceOptions.onSwitchToChat = { agentInitiated -> handleSwitchToChat(agentInitiated) }
         voiceOptions.canSwitchToChat = options.canSwitchToChat
         voiceOptions.autoShowChatOnEnd = options.autoShowChatOnEnd
+        voiceOptions.continueInChatOnDismiss = true
 
         return AgentVoiceController(agent, voiceOptions).also { controller ->
             controller.conversationEventListener = options.chatOptions.conversationEventListener
@@ -162,10 +180,21 @@ public class AgentVoiceChatCoordinator(
         conversationID = null
         encryptionKey = null
         voiceResumeToken = null
-        hasIncompletePersistedResumeState = false
         pendingContinueInChat.set(false)
         pendingAgentHandoff.set(false)
+        pendingReconnectVoice.set(false)
+        voiceSessionErrored.set(false)
         agent.resetConversation()
+    }
+
+    /**
+     * Arms the next [makeVoiceController] call to resume the current voice conversation instead of
+     * starting a new one; the server then emits a `continue-in-voice` client event so the agent can
+     * greet the user back to voice. Call this when presenting voice from a custom
+     * reconnect-to-voice control. One-shot: consumed by the next [makeVoiceController] call.
+     */
+    public fun prepareVoiceReconnect() {
+        pendingReconnectVoice.set(true)
     }
 
     override fun onVoiceEnded() {
@@ -177,7 +206,36 @@ public class AgentVoiceChatCoordinator(
         delegate?.coordinatorVoiceDidEnd(this)
     }
 
+    override fun onVoiceDismissed() {
+        // Dismissal (e.g. back navigation) closes the voice leg with `continue_in_chat`, so persist
+        // the continuation state immediately -- the user may not open chat until after an app
+        // restart.
+        if (conversationID == null || encryptionKey == null) {
+            // This session never delivered credentials (dismissed or errored before session info
+            // arrived), so it created nothing continuable. Leave persisted storage untouched and
+            // re-sync memory to it so the previous conversation, if any, stays resumable in chat
+            // and voice.
+            voiceConversationID = null
+            conversationID = null
+            encryptionKey = null
+            voiceResumeToken = null
+            restorePersistedConversationState()
+            return
+        }
+        if (voiceSessionErrored.get()) {
+            // The server treats an errored call as disconnected and terminal; nothing to resume.
+            resetConversation()
+            return
+        }
+        seedChatContinuationStateIfAvailable(agentInitiated = false)
+        // Arm the one-shot latch so the next chat open lands on the continued transcript instead
+        // of the conversation list.
+        pendingContinueInChat.set(true)
+        pendingAgentHandoff.set(false)
+    }
+
     override fun onVoiceError(error: Throwable) {
+        voiceSessionErrored.set(true)
         delegate?.onVoiceError(this, error)
     }
 
@@ -205,7 +263,6 @@ public class AgentVoiceChatCoordinator(
 
     override fun onResumeTokenReceived(token: String) {
         this.voiceResumeToken = token
-        hasIncompletePersistedResumeState = false
     }
 
     private fun handleSwitchToChat(agentInitiated: Boolean) {
@@ -245,17 +302,19 @@ public class AgentVoiceChatCoordinator(
 
     private fun restorePersistedConversationState() {
         val state = loadPersistedConversationState() ?: return
-        val persistedVoiceConversationID =
-            state.optString("voiceConversationID").takeIf { it.isNotEmpty() }
         conversationID = state.optString("conversationID").takeIf { it.isNotEmpty() }
         encryptionKey = state.optString("encryptionKey").takeIf { it.isNotEmpty() }
-        if (voiceConversationID == null) {
-            voiceConversationID = persistedVoiceConversationID
-        }
-        if (voiceResumeToken == null) {
-            voiceResumeToken = state.optString("voiceResumeToken").takeIf { it.isNotEmpty() }
-        }
-        hasIncompletePersistedResumeState = voiceConversationID != null && voiceResumeToken == null
+        voiceConversationID = state.optString("voiceConversationID").takeIf { it.isNotEmpty() }
+        voiceResumeToken = state.optString("voiceResumeToken").takeIf { it.isNotEmpty() }
+        // Seeded resume flags mean the last voice session ended toward chat and no chat controller
+        // has consumed them yet (the embed strips them once chat opens). Re-arm the one-shot latch
+        // so the next chat open still lands on the continued transcript instead of the list, even
+        // across an app restart.
+        val agentHandoffOnResume = state.optBoolean("agentHandoffOnResume", false)
+        pendingAgentHandoff.set(agentHandoffOnResume)
+        pendingContinueInChat.set(
+            agentHandoffOnResume || state.optBoolean("continueInChatOnResume", false)
+        )
     }
 
     private fun loadPersistedConversationState(): JSONObject? {

@@ -46,6 +46,7 @@ class AgentChatView internal constructor(
     private val agentConfig: AgentConfig,
     private val options: AgentChatControllerOptions,
     private val conversationState: String?,
+    private val conversationID: String?,
     private val listener: ConversationEventListener?,
     private val storage: ConversationStorage?,
     private val fileChooserLauncher: ((Intent) -> Unit)?,
@@ -444,6 +445,12 @@ class AgentChatView internal constructor(
         }
         if (!conversationState.isNullOrEmpty()) {
             urlBuilder.appendQueryParameter("state", conversationState)
+        } else if (!conversationID.isNullOrEmpty()) {
+            if (!options.userIdentityToken.isNullOrEmpty()) {
+                urlBuilder.appendQueryParameter("conversationID", conversationID)
+            } else {
+                Log.w(TAG, "conversationID requires userIdentityToken; ignoring conversationID")
+            }
         }
         if (options.enableConversationList) {
             urlBuilder.appendQueryParameter("enableConversationList", "true")
@@ -472,6 +479,7 @@ class AgentChatView internal constructor(
             STATE_ARGS,
             AgentChatFragmentArgs(agentConfig, options, conversationState),
         )
+        outState.putString(STATE_CONVERSATION_ID, conversationID)
         storage?.getAll()?.let { outState.putSerializable(STATE_STORAGE, HashMap(it)) }
     }
 
@@ -502,7 +510,8 @@ class AgentChatView internal constructor(
         // unchanged. Hosts that rebuild options with new adaptive colors still fall through to
         // loadUrl below because the saved args no longer match the current args.
         if (!savedInstanceState.getBoolean(STATE_PAGE_LOADED) ||
-            savedInstanceState.getParcelable<AgentChatFragmentArgs>(STATE_ARGS) != args
+            savedInstanceState.getParcelable<AgentChatFragmentArgs>(STATE_ARGS) != args ||
+            savedInstanceState.getString(STATE_CONVERSATION_ID) != conversationID
         ) {
             return false
         }
@@ -1009,6 +1018,7 @@ private class ChatWebViewInterface(
 private const val TAG = "AgentChatView"
 private const val STATE_PAGE_LOADED = "pageLoaded"
 private const val STATE_ARGS = "args"
+private const val STATE_CONVERSATION_ID = "conversationID"
 private const val STATE_STORAGE = "storage"
 /**
  * How long to keep the spinner up for a resumed conversation while waiting for

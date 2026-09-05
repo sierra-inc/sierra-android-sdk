@@ -74,7 +74,18 @@ public data class AgentAttachment(
 )
 
 public interface VoiceCallbacks : AgentEventListener {
+    /**
+     * Called when the user explicitly ends the voice session (e.g., taps the End button).
+     * Mutually exclusive with [onVoiceDismissed] -- only one fires per voice view lifetime.
+     */
     public fun onVoiceEnded()
+
+    /**
+     * Called when the voice view is torn down without an explicit End tap or switch-to-chat,
+     * e.g. the user navigates back. Mutually exclusive with [onVoiceEnded].
+     */
+    public fun onVoiceDismissed() {}
+
     public fun onVoiceError(error: Throwable)
     public fun onAgentAttachment(attachments: List<AgentAttachment>) {}
     public fun onSessionInfoReceived(conversationID: String, encryptionKey: String?) {}
@@ -168,9 +179,9 @@ public data class AgentVoiceControllerOptions(
     /**
      * An optional external conversation ID supplied by the host app for a new voice conversation.
      * Use a unique value of at most 256 UTF-8 bytes for each new conversation. Reusing an external
-     * ID does not resume a prior voice session. Use [AgentVoiceChatCoordinator] to continue an
-     * existing voice and chat conversation; it manages the required resume state. When null, the
-     * SDK generates a conversation ID.
+     * ID does not resume a prior voice session. Use [AgentVoiceChatCoordinator] and its
+     * `prepareVoiceReconnect()` to continue an existing voice and chat conversation; it manages the
+     * required resume state. When null, the SDK generates a conversation ID.
      */
     var voiceConversationID: String? = null,
     /**
@@ -301,6 +312,14 @@ public data class AgentVoiceControllerOptions(
      */
     @IgnoredOnParcel
     internal var autoShowChatOnEnd: Boolean = false
+
+    /**
+     * When true, tearing down the voice view (e.g. back navigation) while the session is still
+     * active closes the SVP session with the `continue_in_chat` close reason instead of `normal`,
+     * keeping the conversation resumable in chat. [VoiceCallbacks.onVoiceDismissed] still fires.
+     */
+    @IgnoredOnParcel
+    internal var continueInChatOnDismiss: Boolean = false
 }
 
 public fun AgentVoiceControllerOptions.useLegacyVoiceControls(
@@ -602,7 +621,15 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
     override fun onDestroyView() {
         cancelInitialGreetingFallback()
         cancelTextComposerKeyboardCallbacks()
-        shutdownVoiceSessionIfNeeded()
+        // Teardown without a prior End/switch exit is a dismissal (back navigation, host removal,
+        // or a configuration change). For coordinator-managed sessions, close with
+        // `continue_in_chat` so the conversation stays resumable in chat.
+        if (voiceExitState == VoiceExitState.NONE && options.continueInChatOnDismiss) {
+            shutdownVoiceSessionIfNeeded(AgentVoiceCloseReason.CONTINUE_IN_CHAT)
+        } else {
+            shutdownVoiceSessionIfNeeded()
+        }
+        deliverVoiceDismissedIfNeeded()
         setRendererFullscreen(false)
         rendererView?.destroy()
         rendererView = null
@@ -684,6 +711,14 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         voiceCallbacks?.onVoiceEnded()
     }
 
+    private fun deliverVoiceDismissedIfNeeded() {
+        if (voiceExitState != VoiceExitState.NONE) {
+            return
+        }
+        voiceExitState = VoiceExitState.DISMISSED
+        voiceCallbacks?.onVoiceDismissed()
+    }
+
     private fun deliverSwitchToChatIfNeeded(agentInitiated: Boolean) {
         if (voiceExitState != VoiceExitState.NONE) {
             return
@@ -707,7 +742,16 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
             title = options.titleBarMessage?.takeIf { it.isNotBlank() } ?: options.name
             setNavigationIcon(androidx.appcompat.R.drawable.abc_ic_ab_back_material)
             navigationIcon?.setTint(options.voiceStyle.titleBarTextColor)
-            setNavigationOnClickListener { handleEndTapped() }
+            setNavigationOnClickListener {
+                if (options.continueInChatOnDismiss) {
+                    // Coordinator-managed sessions treat the toolbar back arrow as back
+                    // navigation: the host pops the voice view, and teardown closes the session
+                    // with `continue_in_chat` so the conversation stays resumable in chat.
+                    requireActivity().onBackPressedDispatcher.onBackPressed()
+                } else {
+                    handleEndTapped()
+                }
+            }
             if (options.canSwitchToChat) {
                 switchToChatMenuItem = menu.add(options.switchToChatLabel).apply {
                     setIcon(R.drawable.sierra_ic_chat_bubble_24)
@@ -1878,6 +1922,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
 private enum class VoiceExitState {
     NONE,
     ENDED,
+    DISMISSED,
     SWITCHED_TO_CHAT,
 }
 

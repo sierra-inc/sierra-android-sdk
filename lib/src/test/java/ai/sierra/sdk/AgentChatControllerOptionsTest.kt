@@ -70,11 +70,55 @@ class AgentChatControllerOptionsTest {
         }
     }
 
-    private fun loadedUrl(options: AgentChatControllerOptions): Uri {
+    @Test
+    fun conversationIDIsForwardedWithUserIdentityToken() {
+        val url = loadedUrl(
+            options = AgentChatControllerOptions(
+                name = "Test",
+                userIdentityToken = "user-identity-token",
+            ),
+            conversationID = "external-123",
+        )
+
+        assertEquals("external-123", url.getQueryParameter("conversationID"))
+    }
+
+    @Test
+    fun conversationIDRequiresUserIdentityToken() {
+        val url = loadedUrl(
+            options = AgentChatControllerOptions(name = "Test"),
+            conversationID = "external-123",
+        )
+
+        assertNull(url.getQueryParameter("conversationID"))
+    }
+
+    @Test
+    fun conversationStateTakesPrecedenceOverConversationID() {
+        val url = loadedUrl(
+            options = AgentChatControllerOptions(
+                name = "Test",
+                userIdentityToken = "user-identity-token",
+            ),
+            conversationState = "opaque-state",
+            conversationID = "external-123",
+        )
+
+        assertEquals("opaque-state", url.getQueryParameter("state"))
+        assertNull(url.getQueryParameter("conversationID"))
+    }
+
+    private fun loadedUrl(
+        options: AgentChatControllerOptions,
+        conversationState: String? = null,
+        conversationID: String? = null,
+    ): Uri {
         val activity = Robolectric.buildActivity(FragmentActivity::class.java).setup().get()
         val fragment = AgentChatController(
             agent = Agent(AgentConfig(token = "test-token")),
             options = options,
+            conversationState = conversationState,
+            conversationID = conversationID,
         ).createFragment()
         activity.supportFragmentManager.beginTransaction()
             .add(android.R.id.content, fragment)

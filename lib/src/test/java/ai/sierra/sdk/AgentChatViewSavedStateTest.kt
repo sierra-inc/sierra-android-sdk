@@ -91,7 +91,7 @@ class AgentChatViewSavedStateTest {
      */
     @Test
     fun savedStateSurvivesAMarshalRoundTrip() {
-        val source = createTestChatView()
+        val source = createTestChatView(conversationID = "external-123")
         // saveState only records restorable args once the page has loaded, which is the state a
         // backgrounded chat is in when the process is killed.
         source.setPageLoaded(true)
@@ -102,7 +102,7 @@ class AgentChatViewSavedStateTest {
 
         val restoredContainer = SparseArray<Parcelable>()
         restoredContainer.put(R.id.sierra_agent_chat_view, marshalled)
-        val restored = createTestChatView()
+        val restored = createTestChatView(conversationID = "external-123")
         restored.restoreHierarchyState(restoredContainer)
         val activity = Robolectric.buildActivity(FragmentActivity::class.java).setup()
         activity.get().setContentView(restored)

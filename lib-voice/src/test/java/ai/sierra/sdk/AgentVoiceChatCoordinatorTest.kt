@@ -148,30 +148,58 @@ class AgentVoiceChatCoordinatorTest {
     }
 
     @Test
-    fun matchingConfiguredVoiceConversationIDResumesPersistedConversation() {
+    fun voiceLaunchWithoutReconnectStartsFreshKeepingPersistedChatState() {
         val agent = Agent(AgentConfig(token = "test-token"))
         persistConversationState(agent, voiceConversationID = "voice-123")
         val coordinator = AgentVoiceChatCoordinator(
             agent = agent,
             options = AgentVoiceChatCoordinator.Options(
-                voiceOptions = AgentVoiceControllerOptions(
-                    name = "Voice",
-                    voiceConversationID = "voice-123",
-                ),
+                voiceOptions = AgentVoiceControllerOptions(name = "Voice"),
                 chatOptions = AgentChatControllerOptions(name = "Chat"),
             ),
         )
 
-        assertEquals("chat-123", coordinator.conversationID)
-        assertEquals("voice-123", coordinator.voiceConversationID)
-        assertNotNull(agent.getStorage().getItem("embed-chat-test-token"))
-
         val voiceController = coordinator.makeVoiceController()
 
-        assertEquals("chat-123", coordinator.conversationID)
-        assertEquals("voice-123", voiceController.options.voiceConversationID)
-        assertTrue(voiceController.options.resumeConversation)
-        assertEquals("resume-123", voiceController.options.resumeToken)
+        assertFalse(voiceController.options.resumeConversation)
+        assertNull(voiceController.options.resumeToken)
+        assertTrue(voiceController.options.continueInChatOnDismiss)
+        assertNotNull(coordinator.voiceConversationID)
+        assertNotEquals("voice-123", coordinator.voiceConversationID)
+        assertNull(coordinator.voiceResumeToken)
+        // In-memory chat credentials are cleared so an early dismissal can't seed the prior
+        // conversation against the new voice ID; persisted storage keeps it resumable in chat.
+        assertNull(coordinator.conversationID)
+        assertNull(coordinator.encryptionKey)
+        assertNotNull(agent.getStorage().getItem("embed-chat-test-token"))
+    }
+
+    @Test
+    fun prepareVoiceReconnectResumesOnce() {
+        val agent = Agent(AgentConfig(token = "test-token"))
+        persistConversationState(agent, voiceConversationID = "voice-123")
+        val coordinator = AgentVoiceChatCoordinator(
+            agent = agent,
+            options = AgentVoiceChatCoordinator.Options(
+                voiceOptions = AgentVoiceControllerOptions(name = "Voice"),
+                chatOptions = AgentChatControllerOptions(name = "Chat"),
+            ),
+        )
+
+        coordinator.prepareVoiceReconnect()
+        val reconnectController = coordinator.makeVoiceController()
+
+        assertTrue(reconnectController.options.resumeConversation)
+        assertEquals("resume-123", reconnectController.options.resumeToken)
+        assertEquals(AgentVoiceResumeReason.CONTINUE_IN_VOICE, reconnectController.options.resumeReason)
+        assertEquals("voice-123", reconnectController.options.voiceConversationID)
+
+        // The latch is one-shot: the next launch starts fresh.
+        val freshController = coordinator.makeVoiceController()
+
+        assertFalse(freshController.options.resumeConversation)
+        assertNull(freshController.options.resumeToken)
+        assertNotEquals("voice-123", freshController.options.voiceConversationID)
     }
 
     @Test
@@ -260,65 +288,7 @@ class AgentVoiceChatCoordinatorTest {
     }
 
     @Test
-    fun matchingConfiguredVoiceConversationIDWithoutResumeTokenGeneratesFreshID() {
-        val agent = Agent(AgentConfig(token = "test-token"))
-        persistConversationState(
-            agent,
-            voiceConversationID = "voice-123",
-            voiceResumeToken = null,
-        )
-        val coordinator = AgentVoiceChatCoordinator(
-            agent = agent,
-            options = AgentVoiceChatCoordinator.Options(
-                voiceOptions = AgentVoiceControllerOptions(
-                    name = "Voice",
-                    voiceConversationID = "voice-123",
-                ),
-                chatOptions = AgentChatControllerOptions(name = "Chat"),
-            ),
-        )
-
-        val voiceController = coordinator.makeVoiceController()
-
-        assertNull(coordinator.conversationID)
-        assertNull(coordinator.encryptionKey)
-        assertNull(agent.getStorage().getItem("embed-chat-test-token"))
-        assertNotNull(coordinator.voiceConversationID)
-        assertEquals(coordinator.voiceConversationID, voiceController.options.voiceConversationID)
-        assertNotEquals("voice-123", voiceController.options.voiceConversationID)
-        assertFalse(voiceController.options.resumeConversation)
-        assertNull(voiceController.options.resumeToken)
-    }
-
-    @Test
-    fun sdkManagedVoiceConversationIDWithoutResumeTokenGeneratesFreshID() {
-        val agent = Agent(AgentConfig(token = "test-token"))
-        persistConversationState(
-            agent,
-            voiceConversationID = "voice-123",
-            voiceResumeToken = null,
-        )
-        val coordinator = AgentVoiceChatCoordinator(
-            agent = agent,
-            options = AgentVoiceChatCoordinator.Options(
-                voiceOptions = AgentVoiceControllerOptions(name = "Voice"),
-                chatOptions = AgentChatControllerOptions(name = "Chat"),
-            ),
-        )
-
-        val voiceController = coordinator.makeVoiceController()
-
-        assertNull(coordinator.conversationID)
-        assertNull(coordinator.encryptionKey)
-        assertNull(agent.getStorage().getItem("embed-chat-test-token"))
-        assertNotNull(voiceController.options.voiceConversationID)
-        assertNotEquals("voice-123", voiceController.options.voiceConversationID)
-        assertFalse(voiceController.options.resumeConversation)
-        assertNull(voiceController.options.resumeToken)
-    }
-
-    @Test
-    fun repeatedVoiceControllerCreationKeepsIDWhileResumeTokenIsPending() {
+    fun repeatedVoiceControllerCreationStartsFreshConversations() {
         val coordinator = AgentVoiceChatCoordinator(
             agent = Agent(AgentConfig(token = "test-token")),
             options = AgentVoiceChatCoordinator.Options(
@@ -328,12 +298,250 @@ class AgentVoiceChatCoordinatorTest {
         )
 
         coordinator.makeVoiceController()
-        val pendingVoiceConversationID = coordinator.voiceConversationID
+        val firstVoiceConversationID = coordinator.voiceConversationID
         coordinator.makeVoiceController()
 
-        assertNotNull(pendingVoiceConversationID)
-        assertEquals(pendingVoiceConversationID, coordinator.voiceConversationID)
+        assertNotNull(firstVoiceConversationID)
+        assertNotNull(coordinator.voiceConversationID)
+        assertNotEquals(firstVoiceConversationID, coordinator.voiceConversationID)
         assertNull(coordinator.voiceResumeToken)
+    }
+
+    @Test
+    fun dismissalSeedsChatContinuationState() {
+        val agent = Agent(AgentConfig(token = "test-token"))
+        val coordinator = AgentVoiceChatCoordinator(
+            agent = agent,
+            options = AgentVoiceChatCoordinator.Options(
+                voiceOptions = AgentVoiceControllerOptions(name = "Voice"),
+                chatOptions = AgentChatControllerOptions(name = "Chat"),
+            ),
+        )
+        coordinator.makeVoiceController()
+        coordinator.onSessionInfoReceived("chat-1", "enc-1")
+        coordinator.onResumeTokenReceived("resume-1")
+
+        coordinator.onVoiceDismissed()
+
+        val json = agent.getStorage().getItem("embed-chat-test-token")
+        assertNotNull(json)
+        val state = JSONObject(json!!)
+        assertEquals("chat-1", state.getString("conversationID"))
+        assertEquals("enc-1", state.getString("encryptionKey"))
+        assertTrue(state.getBoolean("continueInChatOnResume"))
+        assertFalse(state.has("agentHandoffOnResume"))
+        assertEquals("resume-1", state.getString("voiceResumeToken"))
+        assertEquals("chat-1", coordinator.conversationID)
+        assertEquals("enc-1", coordinator.encryptionKey)
+    }
+
+    @Test
+    fun dismissalOverridesConversationListDefaultOnce() {
+        val agent = Agent(AgentConfig(token = "test-token"))
+        val chatOptions = AgentChatControllerOptions(
+            name = "Chat",
+            userIdentityToken = "user-identity-token",
+            enableConversationList = true,
+            showConversationListByDefault = true,
+        )
+        val coordinator = AgentVoiceChatCoordinator(
+            agent = agent,
+            options = AgentVoiceChatCoordinator.Options(
+                voiceOptions = AgentVoiceControllerOptions(name = "Voice"),
+                chatOptions = chatOptions,
+            ),
+        )
+        coordinator.makeVoiceController()
+        coordinator.onSessionInfoReceived("chat-1", "enc-1")
+        coordinator.onVoiceDismissed()
+
+        val continuationUrl = loadedUrl(coordinator.makeChatController())
+        val ordinaryUrl = loadedUrl(coordinator.makeChatController())
+
+        assertFalse(continuationUrl.getBooleanQueryParameter("showConversationListByDefault", false))
+        assertTrue(ordinaryUrl.getBooleanQueryParameter("showConversationListByDefault", false))
+    }
+
+    @Test
+    fun restoredDismissalContinuationSuppressesConversationList() {
+        val agent = Agent(AgentConfig(token = "test-token"))
+        val chatOptions = AgentChatControllerOptions(
+            name = "Chat",
+            userIdentityToken = "user-identity-token",
+            enableConversationList = true,
+            showConversationListByDefault = true,
+        )
+        val firstCoordinator = AgentVoiceChatCoordinator(
+            agent = agent,
+            options = AgentVoiceChatCoordinator.Options(
+                voiceOptions = AgentVoiceControllerOptions(name = "Voice"),
+                chatOptions = chatOptions,
+            ),
+        )
+        firstCoordinator.makeVoiceController()
+        firstCoordinator.onSessionInfoReceived("chat-1", "enc-1")
+        firstCoordinator.onVoiceDismissed()
+
+        // Simulates an app restart before chat is opened.
+        val recreatedCoordinator = AgentVoiceChatCoordinator(
+            agent = agent,
+            options = AgentVoiceChatCoordinator.Options(
+                voiceOptions = AgentVoiceControllerOptions(name = "Voice"),
+                chatOptions = chatOptions,
+            ),
+        )
+        val continuationUrl = loadedUrl(recreatedCoordinator.makeChatController())
+
+        assertFalse(continuationUrl.getBooleanQueryParameter("showConversationListByDefault", false))
+    }
+
+    @Test
+    fun dismissalAfterVoiceErrorResets() {
+        val agent = Agent(AgentConfig(token = "test-token"))
+        val coordinator = AgentVoiceChatCoordinator(
+            agent = agent,
+            options = AgentVoiceChatCoordinator.Options(
+                voiceOptions = AgentVoiceControllerOptions(name = "Voice"),
+                chatOptions = AgentChatControllerOptions(name = "Chat"),
+            ),
+        )
+        coordinator.makeVoiceController()
+        coordinator.onSessionInfoReceived("chat-1", "enc-1")
+        coordinator.onResumeTokenReceived("resume-1")
+        coordinator.onVoiceError(IllegalStateException("connection failed"))
+
+        coordinator.onVoiceDismissed()
+
+        assertNull(coordinator.conversationID)
+        assertNull(coordinator.encryptionKey)
+        assertNull(coordinator.voiceConversationID)
+        assertNull(coordinator.voiceResumeToken)
+        assertNull(agent.getStorage().getItem("embed-chat-test-token"))
+    }
+
+    @Test
+    fun dismissalWithoutCredentialsLeavesNoState() {
+        val agent = Agent(AgentConfig(token = "test-token"))
+        val coordinator = AgentVoiceChatCoordinator(
+            agent = agent,
+            options = AgentVoiceChatCoordinator.Options(
+                voiceOptions = AgentVoiceControllerOptions(name = "Voice"),
+                chatOptions = AgentChatControllerOptions(name = "Chat"),
+            ),
+        )
+        coordinator.makeVoiceController()
+
+        coordinator.onVoiceDismissed()
+
+        assertNull(coordinator.conversationID)
+        assertNull(coordinator.voiceConversationID)
+        assertNull(agent.getStorage().getItem("embed-chat-test-token"))
+    }
+
+    @Test
+    fun dismissalBeforeSessionInfoPreservesPriorConversation() {
+        val agent = Agent(AgentConfig(token = "test-token"))
+        persistConversationState(agent, voiceConversationID = "voice-123")
+        val coordinator = AgentVoiceChatCoordinator(
+            agent = agent,
+            options = AgentVoiceChatCoordinator.Options(
+                voiceOptions = AgentVoiceControllerOptions(name = "Voice"),
+                chatOptions = AgentChatControllerOptions(name = "Chat"),
+            ),
+        )
+
+        coordinator.makeVoiceController()
+        coordinator.onVoiceDismissed()
+
+        // The abandoned launch leaves the persisted conversation untouched and re-syncs memory to
+        // it, so the prior conversation keeps working -- including explicit voice reconnect.
+        assertEquals("chat-123", coordinator.conversationID)
+        assertEquals("encryption-123", coordinator.encryptionKey)
+        assertEquals("voice-123", coordinator.voiceConversationID)
+        assertEquals("resume-123", coordinator.voiceResumeToken)
+        val state = JSONObject(requireNotNull(agent.getStorage().getItem("embed-chat-test-token")))
+        assertEquals("voice-123", state.getString("voiceConversationID"))
+        assertEquals("resume-123", state.getString("voiceResumeToken"))
+
+        coordinator.prepareVoiceReconnect()
+        val reconnectController = coordinator.makeVoiceController()
+
+        assertTrue(reconnectController.options.resumeConversation)
+        assertEquals("resume-123", reconnectController.options.resumeToken)
+        assertEquals("voice-123", reconnectController.options.voiceConversationID)
+    }
+
+    @Test
+    fun errorBeforeSessionInfoPreservesPriorConversation() {
+        val agent = Agent(AgentConfig(token = "test-token"))
+        persistConversationState(agent, voiceConversationID = "voice-123")
+        val coordinator = AgentVoiceChatCoordinator(
+            agent = agent,
+            options = AgentVoiceChatCoordinator.Options(
+                voiceOptions = AgentVoiceControllerOptions(name = "Voice"),
+                chatOptions = AgentChatControllerOptions(name = "Chat"),
+            ),
+        )
+
+        coordinator.makeVoiceController()
+        coordinator.onVoiceError(IllegalStateException("connection failed"))
+        coordinator.onVoiceDismissed()
+
+        assertEquals("chat-123", coordinator.conversationID)
+        assertEquals("voice-123", coordinator.voiceConversationID)
+        assertEquals("resume-123", coordinator.voiceResumeToken)
+        assertNotNull(agent.getStorage().getItem("embed-chat-test-token"))
+    }
+
+    @Test
+    fun voiceAfterDismissalStartsFreshConversation() {
+        val agent = Agent(AgentConfig(token = "test-token"))
+        val coordinator = AgentVoiceChatCoordinator(
+            agent = agent,
+            options = AgentVoiceChatCoordinator.Options(
+                voiceOptions = AgentVoiceControllerOptions(name = "Voice"),
+                chatOptions = AgentChatControllerOptions(name = "Chat"),
+            ),
+        )
+        coordinator.makeVoiceController()
+        coordinator.onSessionInfoReceived("chat-1", "enc-1")
+        coordinator.onResumeTokenReceived("resume-1")
+        coordinator.onVoiceDismissed()
+        val dismissedVoiceConversationID = coordinator.voiceConversationID
+
+        val voiceController = coordinator.makeVoiceController()
+
+        assertNotNull(dismissedVoiceConversationID)
+        assertFalse(voiceController.options.resumeConversation)
+        assertNull(voiceController.options.resumeToken)
+        assertNotEquals(dismissedVoiceConversationID, voiceController.options.voiceConversationID)
+        // The dismissed conversation stays resumable in chat via persisted storage.
+        assertNull(coordinator.conversationID)
+        val state = JSONObject(requireNotNull(agent.getStorage().getItem("embed-chat-test-token")))
+        assertEquals("chat-1", state.getString("conversationID"))
+    }
+
+    @Test
+    fun voiceLaunchDropsStaleHandoffLatch() {
+        val agent = Agent(AgentConfig(token = "test-token"))
+        val coordinator = AgentVoiceChatCoordinator(
+            agent = agent,
+            options = AgentVoiceChatCoordinator.Options(
+                voiceOptions = AgentVoiceControllerOptions(name = "Voice"),
+                chatOptions = AgentChatControllerOptions(name = "Chat"),
+            ),
+        )
+        val firstVoiceController = coordinator.makeVoiceController()
+        coordinator.onSessionInfoReceived("chat-1", "enc-1")
+        // The agent requests a handoff but the host never presents chat.
+        firstVoiceController.options.onSwitchToChat?.invoke(true)
+
+        coordinator.makeVoiceController()
+        coordinator.onSessionInfoReceived("chat-2", "enc-2")
+        coordinator.makeChatController()
+
+        // The stale handoff must not seed resume flags for the new conversation.
+        assertNull(agent.getStorage().getItem("embed-chat-test-token"))
     }
 
     private fun persistConversationState(
