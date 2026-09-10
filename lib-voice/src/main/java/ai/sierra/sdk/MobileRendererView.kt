@@ -191,9 +191,6 @@ internal class MobileRendererView(
                 }
             }
         }
-        if (agentConfig.apiHost == AgentAPIHost.LOCAL) {
-            WebView.setWebContentsDebuggingEnabled(true)
-        }
         return true
     }
 

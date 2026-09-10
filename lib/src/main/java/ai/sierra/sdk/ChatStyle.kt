@@ -1,4 +1,5 @@
 // Copyright Sierra
+@file:OptIn(SierraInternalApi::class)
 
 package ai.sierra.sdk
 
@@ -155,6 +156,12 @@ data class ChatTextStyle(
 /**
  * Color settings for chat UI. When useConfiguredStyle is true in AgentChatControllerOptions, these
  * settings are overridden by server-configured colors.
+ *
+ * Values are `@ColorInt` ARGB integers, so use `Color.argb(alpha, red, green, blue)` (or
+ * `Color.rgb(...)` / `Color.parseColor("#RRGGBB")` for an opaque color) rather than a bare
+ * `0xRRGGBB` literal, whose missing alpha byte makes the color fully transparent. Only
+ * `assistantBubble`, `userBubble`, `inputPlaceholder`, `disclosure`, and `disclosureLink` support a
+ * partial alpha; the chat renders every other color fully opaque.
  */
 @Parcelize
 data class ChatStyleColors(
@@ -208,7 +215,7 @@ data class ChatStyleColors(
     /**
      * The color of the placeholder text shown in the message input, also used for the send button
      * arrow when the input is empty. When null, falls back to `text` at reduced opacity; when set,
-     * it is used at full opacity.
+     * its configured opacity is used.
      */
     @ColorInt val inputPlaceholder: Int? = null,
 
@@ -219,10 +226,16 @@ data class ChatStyleColors(
      */
     @ColorInt val uploadButtonIcon: Int? = null,
 
-    /** The color of the disclosure (disclaimer) text. When null, the default disclosure text color is used. */
+    /**
+     * The color of the disclosure (disclaimer) text. When null, defaults to `text` at 65% opacity;
+     * when set, its configured opacity is used.
+     */
     @ColorInt val disclosure: Int? = null,
 
-    /** The color of links within the disclosure (disclaimer) text. */
+    /**
+     * The color of links within the disclosure (disclaimer) text. When null, defaults to
+     * `assistantBubbleLink` at 65% opacity; when set, its configured opacity is used.
+     */
     @ColorInt val disclosureLink: Int? = null,
 
     /** The color of links in chat bubbles for messages from the user. */
@@ -255,7 +268,7 @@ data class ChatStyleColors(
             "assistantBubbleLink" to assistantBubbleLink,
         )
         return colors.filterValues { it != null }
-            .mapValues { String.format("#%06X", it.value!! and 0xFFFFFF) }
+            .mapValues { it.value!!.toHexColor() }
     }
 
 }

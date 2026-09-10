@@ -4,7 +4,6 @@
 package ai.sierra.sdk
 
 import android.content.Context
-import android.graphics.Color
 import android.os.Build
 import okhttp3.OkHttpClient
 import org.json.JSONArray
@@ -47,18 +46,6 @@ internal fun jsonArrayToList(arr: JSONArray): List<Any?> {
         )
     }
     return out
-}
-
-internal fun Int.toHexColor(): String {
-    val a = Color.alpha(this)
-    val r = Color.red(this)
-    val g = Color.green(this)
-    val b = Color.blue(this)
-    return if (a == 255) {
-        String.format("#%02X%02X%02X", r, g, b)
-    } else {
-        String.format("#%02X%02X%02X%02X", r, g, b, a)
-    }
 }
 
 internal fun buildVoiceOkHttpClient(

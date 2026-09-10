@@ -6,6 +6,7 @@ package ai.sierra.sdk
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
+import android.graphics.Rect
 import android.net.Uri
 import android.net.http.SslError
 import android.os.Build
@@ -20,6 +21,7 @@ import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import android.webkit.JavascriptInterface
 import android.webkit.SslErrorHandler
 import android.webkit.ValueCallback
@@ -31,6 +33,9 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.ProgressBar
+import androidx.core.graphics.Insets
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
@@ -56,6 +61,13 @@ class AgentChatView internal constructor(
 ) : FrameLayout(context) {
     private val webView: WebView
     private val loadingSpinner: ProgressBar
+    private val visibleWindowFrame = Rect()
+    private val windowLocation = IntArray(2)
+    private var hostBottomPadding = paddingBottom
+    private var appliedImeBottomPadding = 0
+    private val imeLayoutListener = ViewTreeObserver.OnGlobalLayoutListener {
+        applyImeBottomPadding(currentImeOverlap())
+    }
     /** Handler/runnable for the fallback reveal of a resumed conversation. */
     private val revealHandler = Handler(Looper.getMainLooper())
     private var revealFallbackRunnable: Runnable? = null
@@ -108,6 +120,15 @@ class AgentChatView internal constructor(
             ViewGroup.LayoutParams.MATCH_PARENT,
         )
         options.chatStyle.colors.background?.let { setBackgroundColor(it) }
+        ViewCompat.setOnApplyWindowInsetsListener(this) { _, windowInsets ->
+            applyImeBottomPadding(currentImeOverlap())
+
+            // The container accounts for any overlap, so do not let WebView apply it again.
+            WindowInsetsCompat.Builder(windowInsets)
+                .setInsets(WindowInsetsCompat.Type.ime(), Insets.NONE)
+                .setVisible(WindowInsetsCompat.Type.ime(), false)
+                .build()
+        }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             WebView.startSafeBrowsing(context) {}
@@ -192,10 +213,6 @@ class AgentChatView internal constructor(
                 ),
                 "AndroidSDK",
             )
-        }.also {
-            if (agentConfig.apiHost == AgentAPIHost.LOCAL) {
-                WebView.setWebContentsDebuggingEnabled(true)
-            }
         }
     }
 
@@ -230,6 +247,8 @@ class AgentChatView internal constructor(
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
+        viewTreeObserver.addOnGlobalLayoutListener(imeLayoutListener)
+        ViewCompat.requestApplyInsets(this)
         observeHostLifecycle()
         if (initializeOnAttach) {
             postInitialization()
@@ -237,7 +256,45 @@ class AgentChatView internal constructor(
     }
 
     override fun onDetachedFromWindow() {
+        if (viewTreeObserver.isAlive) {
+            viewTreeObserver.removeOnGlobalLayoutListener(imeLayoutListener)
+        }
         super.onDetachedFromWindow()
+    }
+
+    override fun setPadding(left: Int, top: Int, right: Int, bottom: Int) {
+        hostBottomPadding = bottom
+        super.setPadding(left, top, right, bottom + appliedImeBottomPadding)
+    }
+
+    override fun setPaddingRelative(start: Int, top: Int, end: Int, bottom: Int) {
+        hostBottomPadding = bottom
+        super.setPaddingRelative(start, top, end, bottom + appliedImeBottomPadding)
+    }
+
+    private fun currentImeOverlap(): Int {
+        if (!isAttachedToWindow || height == 0) {
+            return 0
+        }
+        getWindowVisibleDisplayFrame(visibleWindowFrame)
+        getLocationOnScreen(windowLocation)
+        val viewBottom = windowLocation[1] + height
+        val imeVisible = ViewCompat.getRootWindowInsets(this)
+            ?.isVisible(WindowInsetsCompat.Type.ime())
+            ?: false
+        return calculateImeOverlap(
+            viewBottom = viewBottom,
+            visibleWindowBottom = visibleWindowFrame.bottom,
+            imeVisible = imeVisible,
+        )
+    }
+
+    internal fun applyImeBottomPadding(imeBottom: Int) {
+        if (imeBottom == appliedImeBottomPadding) {
+            return
+        }
+        appliedImeBottomPadding = imeBottom
+        super.setPadding(paddingLeft, paddingTop, paddingRight, hostBottomPadding + imeBottom)
     }
 
     private fun observeHostLifecycle() {
@@ -1039,3 +1096,9 @@ private enum class AppStatus(val value: String) {
  */
 private fun String.escapeJsLineSeparators(): String =
     replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+
+internal fun calculateImeOverlap(
+    viewBottom: Int,
+    visibleWindowBottom: Int,
+    imeVisible: Boolean,
+): Int = if (imeVisible) (viewBottom - visibleWindowBottom).coerceAtLeast(0) else 0
