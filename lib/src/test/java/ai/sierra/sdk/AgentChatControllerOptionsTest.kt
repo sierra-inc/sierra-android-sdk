@@ -10,6 +10,7 @@ import androidx.fragment.app.FragmentActivity
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
@@ -22,6 +23,24 @@ import org.robolectric.annotation.ConscryptMode
 @Config(manifest = Config.NONE, sdk = [34])
 @ConscryptMode(ConscryptMode.Mode.OFF)
 class AgentChatControllerOptionsTest {
+    @Test
+    fun disclosureBehaviorIsForwardedToUrl() {
+        val defaultUrl = loadedUrl(AgentChatControllerOptions(name = "Test"))
+        assertNull(defaultUrl.getQueryParameter("disclosurePosition"))
+        assertFalse(defaultUrl.getBooleanQueryParameter("hideDisclosureDuringLiveChat", false))
+
+        val url = loadedUrl(
+            AgentChatControllerOptions(
+                name = "Test",
+                disclosurePosition = DisclosurePosition.PINNED_BELOW_COMPOSER,
+                hideDisclosureDuringLiveChat = true,
+            ),
+        )
+
+        assertEquals("pinnedBelowComposer", url.getQueryParameter("disclosurePosition"))
+        assertTrue(url.getBooleanQueryParameter("hideDisclosureDuringLiveChat", false))
+    }
+
     @Test
     fun confirmEndConversationModeDefaultsToAlwaysAndIsOmittedFromUrl() {
         val options = AgentChatControllerOptions(name = "Test")
@@ -53,6 +72,8 @@ class AgentChatControllerOptionsTest {
             footerEndConversationButton = true,
             initialUserMessage = "Hello",
             confirmEndConversationMode = EndConversationConfirmationMode.LIVE_CHAT,
+            disclosurePosition = DisclosurePosition.PINNED_BELOW_COMPOSER,
+            hideDisclosureDuringLiveChat = true,
         )
         val parcel = Parcel.obtain()
 

@@ -51,6 +51,16 @@ enum class DisclosurePlacement(val value: String) {
     BOTH("both"),
 }
 
+/** Controls where the disclosure sits within the conversation view. */
+enum class DisclosurePosition(val value: String) {
+    /** Scroll with the conversation transcript. */
+    SCROLLING_IN_TRANSCRIPT("scrollingInTranscript"),
+    /** Remain visible above the conversation transcript. */
+    PINNED_ABOVE_TRANSCRIPT("pinnedAboveTranscript"),
+    /** Remain visible below the message composer. */
+    PINNED_BELOW_COMPOSER("pinnedBelowComposer"),
+}
+
 /** Controls when an enabled end-conversation confirmation is shown. */
 enum class EndConversationConfirmationMode(val value: String) {
     /** Confirm whenever the user ends a conversation. */
@@ -279,12 +289,23 @@ data class AgentChatControllerOptions(
     var showScrollToBottom: Boolean = false,
 
     /**
-     * Pin the disclosure text to the top of the chat frame so that it is
-     * visible throughout the conversation. This controls where the disclosure
-     * sits within the conversation view, and has no effect when
-     * disclosurePlacement is CONVERSATION_LIST.
+     * Retained for backward compatibility. When disclosurePosition is null,
+     * true is equivalent to disclosurePosition = DisclosurePosition.PINNED_ABOVE_TRANSCRIPT.
+     * Has no effect when disclosurePlacement is CONVERSATION_LIST.
      */
     var pinDisclosure: Boolean = false,
+
+    /**
+     * Where the disclosure sits within the conversation view. Defaults to
+     * SCROLLING_IN_TRANSCRIPT unless pinDisclosure is true.
+     * This takes precedence over pinDisclosure.
+     */
+    var disclosurePosition: DisclosurePosition? = null,
+
+    /**
+     * Hide the conversation disclosure while waiting for or speaking with a live agent.
+     */
+    var hideDisclosureDuringLiveChat: Boolean = false,
 
     /**
      * Which view(s) the disclosure text is displayed in. Defaults to CONVERSATION.
@@ -376,6 +397,12 @@ data class AgentChatControllerOptions(
     /** Controls when confirmation is shown when [confirmEndConversation] is true. */
     var confirmEndConversationMode: EndConversationConfirmationMode =
         EndConversationConfirmationMode.ALWAYS,
+
+    /**
+     * Optional layout overrides for the message composer (insets, height, corner radius, border,
+     * and action button size). When null, the composer keeps its default layout.
+     */
+    var composerStyle: ChatComposerStyle? = null,
 
 ) : Parcelable {
     companion object {

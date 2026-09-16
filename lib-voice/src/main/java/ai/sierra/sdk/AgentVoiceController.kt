@@ -506,7 +506,8 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
             rendererView?.requestInlineDisplayMode {}
         }
     }
-    private var voiceSession: VoiceSessionManager? = null
+    private lateinit var viewModel: AgentVoiceViewModel
+    internal var voiceSession: VoiceSessionManager? = null
     private var secretRefreshOrchestrator: SecretRefreshOrchestrator? = null
     private var hasShownFirstAttachment = false
     private var hasReceivedInitialGreeting = false
@@ -538,13 +539,21 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         } ?: throw IllegalStateException("AgentVoiceFragment args are required")
         isDisableInterruptions = options.disableInterruptions
 
-        val viewModel = ViewModelProvider(this)[AgentVoiceViewModel::class.java]
+        viewModel = ViewModelProvider(this)[AgentVoiceViewModel::class.java]
         if (controller != null) {
             viewModel.controller = controller
         } else {
             controller = viewModel.controller
         }
         controller?.connectToFragment(this)
+
+        viewModel.retainedSession?.let { retained ->
+            isMuted = retained.isMuted
+            latestInputAudioLevel = retained.latestInputAudioLevel
+            latestOutputAudioLevel = retained.latestOutputAudioLevel
+            hasReceivedInitialGreeting = retained.hasReceivedInitialGreeting
+            hasReceivedInitialAudioMessage = retained.hasReceivedInitialAudioMessage
+        }
     }
 
     override fun onCreateView(
@@ -597,16 +606,32 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
             viewLifecycleOwner,
             rendererFullscreenBackCallback
         )
+        if (viewModel.hasEndedConversation) {
+            voiceExitState = VoiceExitState.ENDED
+            hasShutdownVoiceSession = true
+            updateUIForState(VoiceSessionManager.State.ENDED)
+            return
+        }
+        val retainedSession = viewModel.retainedSession
         if (
             ContextCompat.checkSelfPermission(
                 requireContext(),
                 Manifest.permission.RECORD_AUDIO
             ) != PackageManager.PERMISSION_GRANTED
         ) {
+            if (retainedSession != null) {
+                viewModel.retainedSession = null
+                retainedSession.discard()
+            }
             onError(IllegalStateException("RECORD_AUDIO permission is required before starting voice"))
             return
         }
-        startVoiceSession()
+        if (retainedSession == null) {
+            startVoiceSession()
+        } else {
+            viewModel.retainedSession = null
+            resumeVoiceSession(retainedSession)
+        }
     }
 
     override fun onResume() {
@@ -621,15 +646,22 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
     override fun onDestroyView() {
         cancelInitialGreetingFallback()
         cancelTextComposerKeyboardCallbacks()
-        // Teardown without a prior End/switch exit is a dismissal (back navigation, host removal,
-        // or a configuration change). For coordinator-managed sessions, close with
-        // `continue_in_chat` so the conversation stays resumable in chat.
-        if (voiceExitState == VoiceExitState.NONE && options.continueInChatOnDismiss) {
-            shutdownVoiceSessionIfNeeded(AgentVoiceCloseReason.CONTINUE_IN_CHAT)
+        if (activity?.isChangingConfigurations == true && voiceSession != null && !hasShutdownVoiceSession) {
+            // The session keeps this fragment as its delegate until the replacement claims it. Terminal
+            // callbacks in that brief gap may be handled by the outgoing fragment. We accept this narrow
+            // race instead of buffering every delegate callback during routine configuration changes.
+            retainVoiceSessionForRecreation()
         } else {
-            shutdownVoiceSessionIfNeeded()
+            // Teardown without a prior End/switch exit is a dismissal (back navigation or host
+            // removal). For coordinator-managed sessions, close with `continue_in_chat` so the
+            // conversation stays resumable in chat.
+            if (voiceExitState == VoiceExitState.NONE && options.continueInChatOnDismiss) {
+                shutdownVoiceSessionIfNeeded(AgentVoiceCloseReason.CONTINUE_IN_CHAT)
+            } else {
+                shutdownVoiceSessionIfNeeded()
+            }
+            deliverVoiceDismissedIfNeeded()
         }
-        deliverVoiceDismissedIfNeeded()
         setRendererFullscreen(false)
         rendererView?.destroy()
         rendererView = null
@@ -649,7 +681,15 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
     }
 
     private fun endConversationForExit(closeReason: AgentVoiceCloseReason = AgentVoiceCloseReason.NORMAL) {
-        shutdownVoiceSessionIfNeeded(closeReason)
+        viewModel.hasEndedConversation = true
+        val retainedSession = viewModel.retainedSession
+        if (retainedSession == null) {
+            shutdownVoiceSessionIfNeeded(closeReason)
+        } else {
+            viewModel.retainedSession = null
+            retainedSession.discard(closeReason)
+            hasShutdownVoiceSession = true
+        }
         deliverVoiceEndedIfNeeded()
     }
 
@@ -687,6 +727,44 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         }
         session.connect()
         updateUIForState(VoiceSessionManager.State.CONNECTING)
+    }
+
+    private fun retainVoiceSessionForRecreation() {
+        val session = voiceSession ?: return
+        viewModel.retainedSession = RetainedVoiceSession(
+            session = session,
+            secretRefreshOrchestrator = secretRefreshOrchestrator,
+            isMuted = isMuted,
+            latestInputAudioLevel = latestInputAudioLevel,
+            latestOutputAudioLevel = latestOutputAudioLevel,
+            hasReceivedInitialGreeting = hasReceivedInitialGreeting,
+            hasReceivedInitialAudioMessage = hasReceivedInitialAudioMessage,
+            discardCloseReason = if (options.continueInChatOnDismiss) {
+                AgentVoiceCloseReason.CONTINUE_IN_CHAT
+            } else {
+                AgentVoiceCloseReason.NORMAL
+            }
+        )
+        voiceSession = null
+        secretRefreshOrchestrator = null
+    }
+
+    private fun resumeVoiceSession(retainedSession: RetainedVoiceSession) {
+        val session = retainedSession.session
+        voiceSession = session
+        secretRefreshOrchestrator = retainedSession.secretRefreshOrchestrator
+        secretRefreshOrchestrator?.setCallbacks(voiceCallbacks)
+        session.delegate = this
+        if (session.currentState == VoiceSessionManager.State.ENDED) {
+            updateUIForState(VoiceSessionManager.State.ENDED)
+            shutdownVoiceSessionIfNeeded()
+            deliverVoiceEndedIfNeeded()
+            return
+        }
+        if (options.enableTextInput) {
+            ensureRendererLoaded()
+        }
+        updateUIForState(session.currentState)
     }
 
     private fun shutdownVoiceSessionIfNeeded(closeReason: AgentVoiceCloseReason = AgentVoiceCloseReason.NORMAL) {
@@ -1928,6 +2006,30 @@ private enum class VoiceExitState {
 
 internal class AgentVoiceViewModel : ViewModel() {
     internal var controller: AgentVoiceController? = null
+    internal var retainedSession: RetainedVoiceSession? = null
+    internal var hasEndedConversation = false
+
+    override fun onCleared() {
+        retainedSession?.discard()
+        retainedSession = null
+    }
+}
+
+internal data class RetainedVoiceSession(
+    val session: VoiceSessionManager,
+    val secretRefreshOrchestrator: SecretRefreshOrchestrator?,
+    val isMuted: Boolean,
+    val latestInputAudioLevel: Float,
+    val latestOutputAudioLevel: Float,
+    val hasReceivedInitialGreeting: Boolean,
+    val hasReceivedInitialAudioMessage: Boolean,
+    private val discardCloseReason: AgentVoiceCloseReason
+) {
+    fun discard(closeReason: AgentVoiceCloseReason = this.discardCloseReason) {
+        secretRefreshOrchestrator?.cancel()
+        session.disconnect(closeReason = closeReason)
+        VoiceSessionService.stop(AppContextHolder.applicationContext)
+    }
 }
 
 private fun Fragment.resolvePlaceholderTextColor(): Int {

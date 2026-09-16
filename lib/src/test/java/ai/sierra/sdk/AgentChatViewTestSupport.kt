@@ -16,10 +16,11 @@ internal fun createTestChatView(
     fileChooserLauncher: ((android.content.Intent) -> Unit)? = null,
     onDispose: ((AgentChatView) -> Unit)? = null,
     conversationID: String? = null,
+    options: AgentChatControllerOptions = AgentChatControllerOptions(name = "Test Agent"),
 ): AgentChatView = AgentChatView(
     context = ApplicationProvider.getApplicationContext<Context>(),
     agentConfig = AgentConfig(token = "test-token"),
-    options = AgentChatControllerOptions(name = "Test Agent"),
+    options = options,
     conversationState = null,
     conversationID = conversationID,
     listener = null,

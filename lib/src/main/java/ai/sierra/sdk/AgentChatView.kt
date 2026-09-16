@@ -6,6 +6,7 @@ package ai.sierra.sdk
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
+import android.graphics.Color
 import android.graphics.Rect
 import android.net.Uri
 import android.net.http.SslError
@@ -33,6 +34,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.ProgressBar
+import androidx.annotation.ColorInt
 import androidx.core.graphics.Insets
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -43,6 +45,17 @@ import androidx.lifecycle.findViewTreeLifecycleOwner
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
+
+/** The native loading color. The web embed owns server-configured and translucent backgrounds. */
+@ColorInt
+private fun nativeBackgroundColor(
+    @ColorInt background: Int?,
+    useConfiguredStyle: Boolean,
+): Int? = if (useConfiguredStyle) {
+    Color.TRANSPARENT
+} else {
+    background?.let { if (Color.alpha(it) == 255) it else Color.TRANSPARENT }
+}
 
 /** A plain Android View that hosts Sierra agent chat. */
 @SuppressLint("ViewConstructor")
@@ -119,7 +132,8 @@ class AgentChatView internal constructor(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
         )
-        options.chatStyle.colors.background?.let { setBackgroundColor(it) }
+        nativeBackgroundColor(options.chatStyle.colors.background, options.useConfiguredStyle)
+            ?.let { setBackgroundColor(it) }
         ViewCompat.setOnApplyWindowInsetsListener(this) { _, windowInsets ->
             applyImeBottomPadding(currentImeOverlap())
 
@@ -158,7 +172,8 @@ class AgentChatView internal constructor(
             // preventing transient web loading states from flashing onscreen.
             alpha = 0f
             // Set background color to match chat style to avoid white flash while loading
-            options.chatStyle.colors.background?.let { setBackgroundColor(it) }
+            nativeBackgroundColor(options.chatStyle.colors.background, options.useConfiguredStyle)
+                ?.let { setBackgroundColor(it) }
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.userAgentString = generateUserAgent(context)
@@ -467,6 +482,12 @@ class AgentChatView internal constructor(
         if (options.pinDisclosure) {
             urlBuilder.appendQueryParameter("pinDisclosure", "true")
         }
+        options.disclosurePosition?.let {
+            urlBuilder.appendQueryParameter("disclosurePosition", it.value)
+        }
+        if (options.hideDisclosureDuringLiveChat) {
+            urlBuilder.appendQueryParameter("hideDisclosureDuringLiveChat", "true")
+        }
         if (options.disclosurePlacement != DisclosurePlacement.CONVERSATION) {
             urlBuilder.appendQueryParameter(
                 "disclosurePlacement",
@@ -475,6 +496,9 @@ class AgentChatView internal constructor(
         }
         if (options.removeInputDivider) {
             urlBuilder.appendQueryParameter("removeInputDivider", "true")
+        }
+        options.composerStyle?.toJSONString()?.let {
+            urlBuilder.appendQueryParameter("composerStyle", it)
         }
         if (options.useConfiguredChatStrings) {
             urlBuilder.appendQueryParameter("useConfiguredChatStrings", "true")

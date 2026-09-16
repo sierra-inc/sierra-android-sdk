@@ -116,8 +116,11 @@ internal class VoiceSessionManager(
     private val enableText: Boolean = true,
     private val forwardAgentAttachments: Boolean = true,
     private val enableConversationEvents: Boolean = false,
-    private val delegate: VoiceSessionDelegate
+    delegate: VoiceSessionDelegate
 ) : SecretRefreshVoiceSession {
+    @Volatile
+    var delegate: VoiceSessionDelegate = delegate
+
     private val conversationId: String = conversationId ?: UUID.randomUUID().toString()
     @Volatile private var resumeToken: String? = resumeToken
 
@@ -127,6 +130,9 @@ internal class VoiceSessionManager(
         SPEAKING,
         ENDED,
     }
+
+    val currentState: State
+        get() = state
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val stateLock = Any()

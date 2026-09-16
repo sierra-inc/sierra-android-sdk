@@ -139,6 +139,12 @@ data class ChatTextStyle(
 
     /** Styling overrides for hyperlinks within this region's text. */
     val link: ChatLinkStyle? = null,
+
+    /**
+     * Text alignment: "left", "center", "right", "start", or "end".
+     * When omitted, keeps the region's default alignment.
+     */
+    val textAlign: String? = null,
 ) : Parcelable {
     internal fun toJSON(): Map<String, Any?> {
         val json = mutableMapOf<String, Any?>()
@@ -149,6 +155,7 @@ data class ChatTextStyle(
         fontFamily?.let { json["fontFamily"] = it }
         fontStyle?.let { json["fontStyle"] = it }
         link?.let { json["link"] = it.toJSON() }
+        textAlign?.let { json["textAlign"] = it }
         return json
     }
 }
@@ -159,13 +166,19 @@ data class ChatTextStyle(
  *
  * Values are `@ColorInt` ARGB integers, so use `Color.argb(alpha, red, green, blue)` (or
  * `Color.rgb(...)` / `Color.parseColor("#RRGGBB")` for an opaque color) rather than a bare
- * `0xRRGGBB` literal, whose missing alpha byte makes the color fully transparent. Only
+ * `0xRRGGBB` literal, whose missing alpha byte makes the color fully transparent. Only `background`,
  * `assistantBubble`, `userBubble`, `inputPlaceholder`, `disclosure`, and `disclosureLink` support a
  * partial alpha; the chat renders every other color fully opaque.
  */
 @Parcelize
 data class ChatStyleColors(
-    /** The background color for the chat view. */
+    /**
+     * The background color for the chat view.
+     *
+     * An alpha below 255 (including `Color.TRANSPARENT`) makes the chat composite over whatever the
+     * app draws behind the chat view, so a host-owned gradient, image, animation, or solid color
+     * shows through. Defaults to the opaque background the chat uses today.
+     */
     @ColorInt val background: Int? = null,
 
     /** The color of the user input text and default color for assistant messages. */
@@ -214,8 +227,8 @@ data class ChatStyleColors(
 
     /**
      * The color of the placeholder text shown in the message input, also used for the send button
-     * arrow when the input is empty. When null, falls back to `text` at reduced opacity; when set,
-     * its configured opacity is used.
+     * arrow when the input is empty. When null, falls back to `inputText` at reduced opacity; when
+     * set, its configured opacity is used.
      */
     @ColorInt val inputPlaceholder: Int? = null,
 
@@ -243,6 +256,15 @@ data class ChatStyleColors(
 
     /** The color of links in chat bubbles for messages from the AI assistant. */
     @ColorInt val assistantBubbleLink: Int? = null,
+
+    /**
+     * The color of the message composer's border, drawn when `ChatComposerStyle.borderWidth` is
+     * set. When null, falls back to `border`.
+     */
+    @ColorInt val inputBorder: Int? = null,
+
+    /** The color of the text the user types in the message input. When null, falls back to `text`. */
+    @ColorInt val inputText: Int? = null,
 ) : Parcelable {
     @RestrictTo(RestrictTo.Scope.LIBRARY_GROUP)
     public fun toJSON(): Map<String, String> {
@@ -252,6 +274,8 @@ data class ChatStyleColors(
             "text" to text,
             "border" to border,
             "inputBackground" to inputBackground,
+            "inputBorder" to inputBorder,
+            "inputText" to inputText,
             "titleBar" to titleBar,
             "titleBarText" to titleBarText,
             "assistantBubble" to assistantBubble,
