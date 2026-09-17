@@ -467,6 +467,12 @@ class AgentChatView internal constructor(
         if (options.footerEndConversationButton) {
             urlBuilder.appendQueryParameter("footerEndConversationButton", "true")
         }
+        options.footerEndConversationButtonStyle?.toJSONString()?.let {
+            urlBuilder.appendQueryParameter("footerEndConversationButtonStyle", it)
+        }
+        options.messageInputPresetAction?.toJSONString()?.let {
+            urlBuilder.appendQueryParameter("messageInputPresetAction", it)
+        }
         if (options.canStartNewChat) {
             urlBuilder.appendQueryParameter("canStartNewChat", "true")
         }
@@ -499,6 +505,12 @@ class AgentChatView internal constructor(
         }
         options.composerStyle?.toJSONString()?.let {
             urlBuilder.appendQueryParameter("composerStyle", it)
+        }
+        options.endConversationConfirmationStyle?.toJSONString()?.let {
+            urlBuilder.appendQueryParameter("endConversationConfirmationStyle", it)
+        }
+        options.conversationEndedStyle?.toJSONString()?.let {
+            urlBuilder.appendQueryParameter("conversationEndedStyle", it)
         }
         if (options.useConfiguredChatStrings) {
             urlBuilder.appendQueryParameter("useConfiguredChatStrings", "true")

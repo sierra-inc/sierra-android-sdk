@@ -167,7 +167,7 @@ data class ChatTextStyle(
  * Values are `@ColorInt` ARGB integers, so use `Color.argb(alpha, red, green, blue)` (or
  * `Color.rgb(...)` / `Color.parseColor("#RRGGBB")` for an opaque color) rather than a bare
  * `0xRRGGBB` literal, whose missing alpha byte makes the color fully transparent. Only `background`,
- * `assistantBubble`, `userBubble`, `inputPlaceholder`, `disclosure`, and `disclosureLink` support a
+ * `assistantBubble`, `humanAgentBubble`, `userBubble`, `inputPlaceholder`, `disclosure`, and `disclosureLink` support a
  * partial alpha; the chat renders every other color fully opaque.
  */
 @Parcelize
@@ -265,6 +265,13 @@ data class ChatStyleColors(
 
     /** The color of the text the user types in the message input. When null, falls back to `text`. */
     @ColorInt val inputText: Int? = null,
+
+    /** Human-agent bubble background. Defaults to `assistantBubble`, including opacity. */
+    @ColorInt val humanAgentBubble: Int? = null,
+    /** Human-agent bubble text color. Defaults to `assistantBubbleText`. */
+    @ColorInt val humanAgentBubbleText: Int? = null,
+    /** Human-agent bubble link color. Defaults to `assistantBubbleLink`. */
+    @ColorInt val humanAgentBubbleLink: Int? = null,
 ) : Parcelable {
     @RestrictTo(RestrictTo.Scope.LIBRARY_GROUP)
     public fun toJSON(): Map<String, String> {
@@ -290,6 +297,9 @@ data class ChatStyleColors(
             "disclosureLink" to disclosureLink,
             "userBubbleLink" to userBubbleLink,
             "assistantBubbleLink" to assistantBubbleLink,
+            "humanAgentBubble" to humanAgentBubble,
+            "humanAgentBubbleText" to humanAgentBubbleText,
+            "humanAgentBubbleLink" to humanAgentBubbleLink,
         )
         return colors.filterValues { it != null }
             .mapValues { it.value!!.toHexColor() }

@@ -29,6 +29,49 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class AgentChatViewSavedStateTest {
+    private val customOptions = AgentChatControllerOptions(
+        name = "Custom Agent",
+        greetingMessage = "Welcome back",
+        showTimestamps = false,
+        chatStyle = ChatStyle(
+            colors = ChatStyleColors(
+                inputText = 0xff123456.toInt(),
+                humanAgentBubble = 0,
+                humanAgentBubbleText = 0xff112233.toInt(),
+                humanAgentBubbleLink = 0xff445566.toInt(),
+            ),
+            typography = ChatStyleTypography(
+                messageInput = ChatTextStyle(fontSize = 18, fontWeight = 600),
+            ),
+        ),
+        composerStyle = ChatComposerStyle(
+            contentInsets = ChatComposerInsets(start = 12, end = 16),
+            maximumLines = 4,
+        ),
+    )
+
+    @Test
+    fun humanAgentColorsSurvivePublicParcelableRoundTrips() {
+        val defaults = ChatStyleColors()
+        for (colors in listOf(
+            defaults.copy(
+                humanAgentBubble = 0,
+                humanAgentBubbleText = 0xff112233.toInt(),
+                humanAgentBubbleLink = 0xff445566.toInt(),
+            ),
+            defaults.copy(humanAgentBubbleText = 0),
+            defaults.copy(humanAgentBubbleLink = 0),
+            defaults,
+        )) {
+            val options = AgentChatControllerOptions(
+                name = "Test Agent",
+                chatStyle = ChatStyle(colors = colors),
+            )
+            assertEquals(colors, marshalThenUnmarshal(colors))
+            assertEquals(options, marshalThenUnmarshal(options))
+        }
+    }
+
     @Test
     fun saveHierarchyStateStoresStateUnderTheStableViewId() {
         val view = createTestChatView()
@@ -91,7 +134,24 @@ class AgentChatViewSavedStateTest {
      */
     @Test
     fun savedStateSurvivesAMarshalRoundTrip() {
-        val source = createTestChatView(conversationID = "external-123")
+        val options = customOptions.copy(
+            conversationEndedStyle = ChatConversationEndedStyle(
+                messageAlignment = ChatConversationEndedStyle.MessageAlignment.CENTER,
+                showComposerContainer = false,
+                actionSpacing = 0,
+                newChatButtonStyle = ChatButtonStyle(width = "100%", height = "48px"),
+            ),
+            footerEndConversationButtonStyle = ChatButtonStyle(width = "100%"),
+            messageInputPresetAction = MessageInputPresetAction(
+                "Help",
+                MessageInputPresetAction.ClientEvent(MessageInputPresetAction.ClientEvent.Message("Help")),
+            ),
+            endConversationConfirmationStyle = EndConversationConfirmationStyle(
+                showFooterDivider = false,
+                confirmButton = ChatButtonStyle(height = "48px"),
+            ),
+        )
+        val source = createTestChatView(conversationID = "external-123", options = options)
         // saveState only records restorable args once the page has loaded, which is the state a
         // backgrounded chat is in when the process is killed.
         source.setPageLoaded(true)
@@ -102,7 +162,10 @@ class AgentChatViewSavedStateTest {
 
         val restoredContainer = SparseArray<Parcelable>()
         restoredContainer.put(R.id.sierra_agent_chat_view, marshalled)
-        val restored = createTestChatView(conversationID = "external-123")
+        val restored = createTestChatView(
+            conversationID = "external-123",
+            options = options.copy(),
+        )
         restored.restoreHierarchyState(restoredContainer)
         val activity = Robolectric.buildActivity(FragmentActivity::class.java).setup()
         activity.get().setContentView(restored)

@@ -404,6 +404,17 @@ data class AgentChatControllerOptions(
      */
     var composerStyle: ChatComposerStyle? = null,
 
+    /** Optional style for the input-area end conversation button. */
+    var footerEndConversationButtonStyle: ChatButtonStyle? = null,
+
+    /** Optional text-message action above the composer. */
+    var messageInputPresetAction: MessageInputPresetAction? = null,
+
+    /** Style overrides for inline end-conversation confirmation. Null keeps the default style. */
+    var endConversationConfirmationStyle: EndConversationConfirmationStyle? = null,
+
+    /** Layout of the ended message and its optional new-conversation action. */
+    var conversationEndedStyle: ChatConversationEndedStyle? = null,
 ) : Parcelable {
     companion object {
         // A baseline instance with the hardcoded English defaults, used to detect which

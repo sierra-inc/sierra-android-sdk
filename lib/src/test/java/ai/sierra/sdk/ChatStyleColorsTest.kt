@@ -39,4 +39,18 @@ class ChatStyleColorsTest {
 
         assertEquals(mapOf("text" to "#000000"), colors.toJSON())
     }
+
+    @Test
+    fun humanAgentColorsUseEmbedKeys() {
+        val colors = ChatStyleColors(
+            humanAgentBubble = Color.argb(0x80, 0x12, 0x34, 0x56),
+            humanAgentBubbleText = Color.BLACK,
+            humanAgentBubbleLink = Color.BLUE,
+        )
+        assertEquals(mapOf(
+            "humanAgentBubble" to "#12345680",
+            "humanAgentBubbleText" to "#000000",
+            "humanAgentBubbleLink" to "#0000FF",
+        ), colors.toJSON())
+    }
 }
