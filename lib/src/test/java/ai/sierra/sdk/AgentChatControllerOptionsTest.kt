@@ -54,6 +54,7 @@ class AgentChatControllerOptionsTest {
                 ),
                 conversationEndedStyle = ChatConversationEndedStyle(
                     messageAlignment = ChatConversationEndedStyle.MessageAlignment.CENTER,
+                    showDisclosure = false,
                     showComposerContainer = false,
                     actionSpacing = 0,
                     newChatButtonStyle = style,
@@ -88,6 +89,7 @@ class AgentChatControllerOptionsTest {
         assertEquals("40px", confirmation.getJSONObject("cancelButton").getString("height"))
         val ended = JSONObject(url.getQueryParameter("conversationEndedStyle")!!)
         assertEquals("center", ended.getString("messageAlignment"))
+        assertFalse(ended.getBoolean("showDisclosure"))
         assertFalse(ended.getBoolean("showComposerContainer"))
         assertEquals(0, ended.getInt("actionSpacing"))
         assertEquals("end", ended.getJSONObject("newChatButtonStyle").getString("alignment"))
@@ -113,6 +115,24 @@ class AgentChatControllerOptionsTest {
     }
 
     @Test
+    fun bubbleTailOptionIsForwardedInBrandOnlyWhenConfigured() {
+        val defaultBrand = JSONObject(
+            loadedUrl(AgentChatControllerOptions(name = "Test")).getQueryParameter("brand")!!,
+        )
+        assertFalse(defaultBrand.has("hideBubbleTails"))
+
+        val brand = JSONObject(
+            loadedUrl(
+                AgentChatControllerOptions(
+                    name = "Test",
+                    hideBubbleTails = false,
+                ),
+            ).getQueryParameter("brand")!!,
+        )
+        assertFalse(brand.getBoolean("hideBubbleTails"))
+    }
+
+    @Test
     fun confirmEndConversationModeDefaultsToAlwaysAndIsOmittedFromUrl() {
         val options = AgentChatControllerOptions(name = "Test")
 
@@ -133,6 +153,27 @@ class AgentChatControllerOptionsTest {
     }
 
     @Test
+    fun initialUserMessageFrequencyDefaultsToEveryConversationAndForwardsOptIn() {
+        val defaultOptions = AgentChatControllerOptions(name = "Test")
+        assertEquals(
+            InitialUserMessageFrequency.EVERY_CONVERSATION,
+            defaultOptions.initialUserMessageFrequency,
+        )
+        assertNull(loadedUrl(defaultOptions).getQueryParameter("initialUserMessageFrequency"))
+
+        val url = loadedUrl(
+            AgentChatControllerOptions(
+                name = "Test",
+                initialUserMessageFrequency = InitialUserMessageFrequency.ONCE_PER_CHAT_INSTANCE,
+            ),
+        )
+        assertEquals(
+            "oncePerChatInstance",
+            url.getQueryParameter("initialUserMessageFrequency"),
+        )
+    }
+
+    @Test
     fun confirmEndConversationModeSurvivesParcelableRoundTrip() {
         val options = AgentChatControllerOptions(
             name = "Test",
@@ -142,6 +183,7 @@ class AgentChatControllerOptionsTest {
             confirmEndConversation = true,
             footerEndConversationButton = true,
             initialUserMessage = "Hello",
+            initialUserMessageFrequency = InitialUserMessageFrequency.ONCE_PER_CHAT_INSTANCE,
             confirmEndConversationMode = EndConversationConfirmationMode.LIVE_CHAT,
             endConversationConfirmationStyle = EndConversationConfirmationStyle(
                 showFooterDivider = false,
@@ -152,6 +194,7 @@ class AgentChatControllerOptionsTest {
             hideDisclosureDuringLiveChat = true,
             conversationEndedStyle = ChatConversationEndedStyle(
                 messageAlignment = ChatConversationEndedStyle.MessageAlignment.CENTER,
+                showDisclosure = false,
                 showComposerContainer = false,
                 actionSpacing = 0,
                 newChatButtonStyle = ChatButtonStyle(width = "100%", height = "48px"),

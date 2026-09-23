@@ -5,6 +5,7 @@ package ai.sierra.sdk
 import androidx.core.graphics.Insets
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.updatePadding
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Test
@@ -46,6 +47,104 @@ class AgentChatViewWindowInsetsTest {
     }
 
     @Test
+    fun topInsetOverlapAccountsForViewPositionAndHostPadding() {
+        assertEquals(63, calculateTopInsetOverlap(viewTop = 0, hostTopPadding = 0, topInset = 63))
+        assertEquals(0, calculateTopInsetOverlap(viewTop = 63, hostTopPadding = 0, topInset = 63))
+        assertEquals(0, calculateTopInsetOverlap(viewTop = 0, hostTopPadding = 63, topInset = 63))
+        assertEquals(33, calculateTopInsetOverlap(viewTop = 20, hostTopPadding = 10, topInset = 63))
+        assertEquals(0, calculateTopInsetOverlap(viewTop = 0, hostTopPadding = 0, topInset = 0))
+    }
+
+    @Test
+    fun systemBarTopInsetIsConsumedOnlyForBuiltInTitleBar() {
+        val systemBarsType = WindowInsetsCompat.Type.systemBars()
+        val windowInsets = WindowInsetsCompat.Builder()
+            .setInsets(systemBarsType, Insets.of(1, 63, 2, 24))
+            .setVisible(systemBarsType, true)
+            .build()
+
+        val builtInTitleBarInsets = ViewCompat.dispatchApplyWindowInsets(
+            createTestChatView(),
+            windowInsets,
+        )
+        val hiddenTitleBarInsets = ViewCompat.dispatchApplyWindowInsets(
+            createTestChatView(
+                options = AgentChatControllerOptions(name = "Test Agent", hideTitleBar = true),
+            ),
+            windowInsets,
+        )
+
+        assertEquals(Insets.of(1, 0, 2, 24), builtInTitleBarInsets.getInsets(systemBarsType))
+        assertEquals(Insets.of(1, 63, 2, 24), hiddenTitleBarInsets.getInsets(systemBarsType))
+    }
+
+    @Test
+    fun displayCutoutTopInsetIsConsumedWhenStatusBarIsHidden() {
+        val statusBarsType = WindowInsetsCompat.Type.statusBars()
+        val displayCutoutType = WindowInsetsCompat.Type.displayCutout()
+        val windowInsets = WindowInsetsCompat.Builder()
+            .setInsets(statusBarsType, Insets.NONE)
+            .setVisible(statusBarsType, false)
+            .setInsets(displayCutoutType, Insets.of(3, 96, 4, 5))
+            .build()
+
+        val builtInTitleBarInsets = ViewCompat.dispatchApplyWindowInsets(
+            createTestChatView(),
+            windowInsets,
+        )
+        val hiddenTitleBarInsets = ViewCompat.dispatchApplyWindowInsets(
+            createTestChatView(
+                options = AgentChatControllerOptions(name = "Test Agent", hideTitleBar = true),
+            ),
+            windowInsets,
+        )
+
+        assertEquals(Insets.NONE, builtInTitleBarInsets.getInsets(statusBarsType))
+        assertEquals(Insets.of(3, 0, 4, 5), builtInTitleBarInsets.getInsets(displayCutoutType))
+        assertEquals(Insets.NONE, hiddenTitleBarInsets.getInsets(statusBarsType))
+        assertEquals(Insets.of(3, 96, 4, 5), hiddenTitleBarInsets.getInsets(displayCutoutType))
+    }
+
+    @Test
+    fun hostTopPaddingIsPreservedAcrossInsetChanges() {
+        val chatView = createTestChatView()
+        chatView.setPadding(1, 10, 3, 4)
+
+        chatView.applyTopInsetPadding(53)
+        assertEquals(63, chatView.paddingTop)
+
+        chatView.setPadding(5, 20, 7, 8)
+        assertEquals(73, chatView.paddingTop)
+
+        chatView.applyTopInsetPadding(43)
+        assertEquals(63, chatView.paddingTop)
+
+        chatView.applyTopInsetPadding(0)
+        assertEquals(5, chatView.paddingLeft)
+        assertEquals(20, chatView.paddingTop)
+        assertEquals(7, chatView.paddingRight)
+        assertEquals(8, chatView.paddingBottom)
+    }
+
+    @Test
+    fun partialPaddingUpdateDoesNotPersistAppliedInsets() {
+        val chatView = createTestChatView()
+        chatView.setPadding(1, 10, 3, 4)
+        chatView.applyTopInsetPadding(53)
+        chatView.applyImeBottomPadding(819)
+
+        chatView.updatePadding(left = 5)
+        assertEquals(63, chatView.paddingTop)
+        assertEquals(823, chatView.paddingBottom)
+
+        chatView.applyTopInsetPadding(0)
+        chatView.applyImeBottomPadding(0)
+        assertEquals(5, chatView.paddingLeft)
+        assertEquals(10, chatView.paddingTop)
+        assertEquals(4, chatView.paddingBottom)
+    }
+
+    @Test
     fun hostPaddingSetWhileImeVisibleIsPreservedWhenImeCloses() {
         val chatView = createTestChatView()
         chatView.setPadding(1, 2, 3, 0)
@@ -64,14 +163,18 @@ class AgentChatViewWindowInsetsTest {
     }
 
     @Test
-    fun hostRelativePaddingSetWhileImeVisibleIsPreservedWhenImeCloses() {
+    fun hostRelativePaddingSetWhileInsetsAreVisibleIsPreservedWhenInsetsClear() {
         val chatView = createTestChatView()
+        chatView.applyTopInsetPadding(63)
         chatView.applyImeBottomPadding(819)
 
-        chatView.setPaddingRelative(4, 5, 6, 48)
+        chatView.setPaddingRelative(4, 20, 6, 48)
+        assertEquals(83, chatView.paddingTop)
         assertEquals(867, chatView.paddingBottom)
 
+        chatView.applyTopInsetPadding(0)
         chatView.applyImeBottomPadding(0)
+        assertEquals(20, chatView.paddingTop)
         assertEquals(48, chatView.paddingBottom)
     }
 }

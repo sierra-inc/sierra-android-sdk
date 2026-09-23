@@ -137,6 +137,7 @@ class AgentChatViewSavedStateTest {
         val options = customOptions.copy(
             conversationEndedStyle = ChatConversationEndedStyle(
                 messageAlignment = ChatConversationEndedStyle.MessageAlignment.CENTER,
+                showDisclosure = false,
                 showComposerContainer = false,
                 actionSpacing = 0,
                 newChatButtonStyle = ChatButtonStyle(width = "100%", height = "48px"),

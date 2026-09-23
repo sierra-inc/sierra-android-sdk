@@ -167,8 +167,9 @@ data class ChatTextStyle(
  * Values are `@ColorInt` ARGB integers, so use `Color.argb(alpha, red, green, blue)` (or
  * `Color.rgb(...)` / `Color.parseColor("#RRGGBB")` for an opaque color) rather than a bare
  * `0xRRGGBB` literal, whose missing alpha byte makes the color fully transparent. Only `background`,
- * `assistantBubble`, `humanAgentBubble`, `userBubble`, `inputPlaceholder`, `disclosure`, and `disclosureLink` support a
- * partial alpha; the chat renders every other color fully opaque.
+ * `assistantBubble`, `humanAgentBubble`, `userBubble`, `assistantBubbleBorder`,
+ * `humanAgentBubbleBorder`, `userBubbleBorder`, `inputPlaceholder`, `disclosure`, and
+ * `disclosureLink` support a partial alpha; the chat renders every other color fully opaque.
  */
 @Parcelize
 data class ChatStyleColors(
@@ -272,6 +273,15 @@ data class ChatStyleColors(
     @ColorInt val humanAgentBubbleText: Int? = null,
     /** Human-agent bubble link color. Defaults to `assistantBubbleLink`. */
     @ColorInt val humanAgentBubbleLink: Int? = null,
+
+    /** The border color for AI assistant chat bubbles. When null, no border is drawn. */
+    @ColorInt val assistantBubbleBorder: Int? = null,
+
+    /** The border color for user chat bubbles. When null, no border is drawn. */
+    @ColorInt val userBubbleBorder: Int? = null,
+
+    /** Human-agent bubble border color. Defaults to `assistantBubbleBorder`. */
+    @ColorInt val humanAgentBubbleBorder: Int? = null,
 ) : Parcelable {
     @RestrictTo(RestrictTo.Scope.LIBRARY_GROUP)
     public fun toJSON(): Map<String, String> {
@@ -297,9 +307,12 @@ data class ChatStyleColors(
             "disclosureLink" to disclosureLink,
             "userBubbleLink" to userBubbleLink,
             "assistantBubbleLink" to assistantBubbleLink,
+            "assistantBubbleBorder" to assistantBubbleBorder,
+            "userBubbleBorder" to userBubbleBorder,
             "humanAgentBubble" to humanAgentBubble,
             "humanAgentBubbleText" to humanAgentBubbleText,
             "humanAgentBubbleLink" to humanAgentBubbleLink,
+            "humanAgentBubbleBorder" to humanAgentBubbleBorder,
         )
         return colors.filterValues { it != null }
             .mapValues { it.value!!.toHexColor() }

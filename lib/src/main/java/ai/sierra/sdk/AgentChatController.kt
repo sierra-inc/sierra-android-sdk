@@ -69,6 +69,14 @@ enum class EndConversationConfirmationMode(val value: String) {
     LIVE_CHAT("liveChat"),
 }
 
+/** Controls how often the initial user message is sent. */
+enum class InitialUserMessageFrequency(val value: String) {
+    /** Send the message when every new conversation starts. */
+    EVERY_CONVERSATION("everyConversation"),
+    /** Send the message only for the first new conversation in this controller instance. */
+    ONCE_PER_CHAT_INSTANCE("oncePerChatInstance"),
+}
+
 /**
  * Controls the text direction of the chat interface.
  */
@@ -391,8 +399,18 @@ data class AgentChatControllerOptions(
     /** Label for the new chat button. */
     var newChatButtonLabel: String = "Start new chat",
 
-    /** Message that will be automatically sent from the user when the conversation starts. */
+    /**
+     * Message sent from the customer when a conversation starts. This property has no effect when
+     * the agent enables the `start` client event, which runs for every new conversation.
+     */
     var initialUserMessage: String? = null,
+
+    /**
+     * Controls how often [initialUserMessage] is sent. Defaults to every new conversation.
+     * ONCE_PER_CHAT_INSTANCE resets when the controller is recreated.
+     */
+    var initialUserMessageFrequency: InitialUserMessageFrequency =
+        InitialUserMessageFrequency.EVERY_CONVERSATION,
 
     /** Controls when confirmation is shown when [confirmEndConversation] is true. */
     var confirmEndConversationMode: EndConversationConfirmationMode =
@@ -415,6 +433,9 @@ data class AgentChatControllerOptions(
 
     /** Layout of the ended message and its optional new-conversation action. */
     var conversationEndedStyle: ChatConversationEndedStyle? = null,
+
+    /** Whether to hide all chat bubble tails. Null uses the server-configured value. */
+    var hideBubbleTails: Boolean? = null,
 ) : Parcelable {
     companion object {
         // A baseline instance with the hardcoded English defaults, used to detect which

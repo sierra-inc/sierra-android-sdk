@@ -15,12 +15,20 @@ import org.robolectric.annotation.Config
 class ChatComposerStyleTest {
     @Test
     fun composerColorsPreserveExistingPositionalArguments() {
-        val colors = ChatStyleColors(1, 2, 3, 4, 5, 6)
+        val colors = ChatStyleColors(
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+        )
 
         assertEquals(5, colors.titleBar)
         assertEquals(6, colors.titleBarText)
-        assertNull(colors.inputBorder)
-        assertNull(colors.inputText)
+        assertEquals(19, colors.inputBorder)
+        assertEquals(20, colors.inputText)
+        assertEquals(21, colors.humanAgentBubble)
+        assertEquals(22, colors.humanAgentBubbleText)
+        assertEquals(23, colors.humanAgentBubbleLink)
+        assertNull(colors.assistantBubbleBorder)
+        assertNull(colors.userBubbleBorder)
+        assertNull(colors.humanAgentBubbleBorder)
     }
 
     @Test

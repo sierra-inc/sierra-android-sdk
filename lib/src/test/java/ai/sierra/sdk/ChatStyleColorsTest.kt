@@ -53,4 +53,17 @@ class ChatStyleColorsTest {
             "humanAgentBubbleLink" to "#0000FF",
         ), colors.toJSON())
     }
+
+    @Test
+    fun bubbleBorderColorsUseEmbedKeys() {
+        val colors = ChatStyleColors(
+            assistantBubbleBorder = Color.argb(0x80, 0xFF, 0, 0),
+            userBubbleBorder = Color.argb(0x40, 0, 0xFF, 0),
+            humanAgentBubbleBorder = Color.argb(0, 0, 0, 0xFF),
+        )
+
+        assertEquals("#FF000080", colors.toJSON()["assistantBubbleBorder"])
+        assertEquals("#00FF0040", colors.toJSON()["userBubbleBorder"])
+        assertEquals("#0000FF00", colors.toJSON()["humanAgentBubbleBorder"])
+    }
 }

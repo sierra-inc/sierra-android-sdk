@@ -76,9 +76,18 @@ class AgentChatView internal constructor(
     private val loadingSpinner: ProgressBar
     private val visibleWindowFrame = Rect()
     private val windowLocation = IntArray(2)
+    private val topInsetTypes =
+        WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+    private var hostTopPadding = paddingTop
     private var hostBottomPadding = paddingBottom
+    private var appliedTopInsetPadding = 0
     private var appliedImeBottomPadding = 0
-    private val imeLayoutListener = ViewTreeObserver.OnGlobalLayoutListener {
+    private val insetLayoutListener = ViewTreeObserver.OnGlobalLayoutListener {
+        val topInset = ViewCompat.getRootWindowInsets(this)
+            ?.getInsets(topInsetTypes)
+            ?.top
+            ?: 0
+        applyTopInsetPadding(currentTopInsetOverlap(topInset))
         applyImeBottomPadding(currentImeOverlap())
     }
     /** Handler/runnable for the fallback reveal of a resumed conversation. */
@@ -135,13 +144,29 @@ class AgentChatView internal constructor(
         nativeBackgroundColor(options.chatStyle.colors.background, options.useConfiguredStyle)
             ?.let { setBackgroundColor(it) }
         ViewCompat.setOnApplyWindowInsetsListener(this) { _, windowInsets ->
+            val systemBarsType = WindowInsetsCompat.Type.systemBars()
+            val displayCutoutType = WindowInsetsCompat.Type.displayCutout()
+            val systemBars = windowInsets.getInsets(systemBarsType)
+            val displayCutout = windowInsets.getInsets(displayCutoutType)
+            val topInset = windowInsets.getInsets(topInsetTypes).top
+            applyTopInsetPadding(currentTopInsetOverlap(topInset))
             applyImeBottomPadding(currentImeOverlap())
 
-            // The container accounts for any overlap, so do not let WebView apply it again.
-            WindowInsetsCompat.Builder(windowInsets)
+            // The container accounts for these overlaps, so do not let WebView apply them again.
+            val remainingInsets = WindowInsetsCompat.Builder(windowInsets)
                 .setInsets(WindowInsetsCompat.Type.ime(), Insets.NONE)
                 .setVisible(WindowInsetsCompat.Type.ime(), false)
-                .build()
+            if (!options.hideTitleBar) {
+                remainingInsets.setInsets(
+                    systemBarsType,
+                    Insets.of(systemBars.left, 0, systemBars.right, systemBars.bottom),
+                )
+                remainingInsets.setInsets(
+                    displayCutoutType,
+                    Insets.of(displayCutout.left, 0, displayCutout.right, displayCutout.bottom),
+                )
+            }
+            remainingInsets.build()
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
@@ -262,7 +287,7 @@ class AgentChatView internal constructor(
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
-        viewTreeObserver.addOnGlobalLayoutListener(imeLayoutListener)
+        viewTreeObserver.addOnGlobalLayoutListener(insetLayoutListener)
         ViewCompat.requestApplyInsets(this)
         observeHostLifecycle()
         if (initializeOnAttach) {
@@ -272,19 +297,46 @@ class AgentChatView internal constructor(
 
     override fun onDetachedFromWindow() {
         if (viewTreeObserver.isAlive) {
-            viewTreeObserver.removeOnGlobalLayoutListener(imeLayoutListener)
+            viewTreeObserver.removeOnGlobalLayoutListener(insetLayoutListener)
         }
         super.onDetachedFromWindow()
     }
 
     override fun setPadding(left: Int, top: Int, right: Int, bottom: Int) {
-        hostBottomPadding = bottom
-        super.setPadding(left, top, right, bottom + appliedImeBottomPadding)
+        hostTopPadding = updatedHostPadding(top, paddingTop, hostTopPadding)
+        hostBottomPadding = updatedHostPadding(bottom, paddingBottom, hostBottomPadding)
+        super.setPadding(
+            left,
+            hostTopPadding + appliedTopInsetPadding,
+            right,
+            hostBottomPadding + appliedImeBottomPadding,
+        )
     }
 
     override fun setPaddingRelative(start: Int, top: Int, end: Int, bottom: Int) {
-        hostBottomPadding = bottom
-        super.setPaddingRelative(start, top, end, bottom + appliedImeBottomPadding)
+        hostTopPadding = updatedHostPadding(top, paddingTop, hostTopPadding)
+        hostBottomPadding = updatedHostPadding(bottom, paddingBottom, hostBottomPadding)
+        super.setPaddingRelative(
+            start,
+            hostTopPadding + appliedTopInsetPadding,
+            end,
+            hostBottomPadding + appliedImeBottomPadding,
+        )
+    }
+
+    private fun updatedHostPadding(requested: Int, current: Int, host: Int): Int =
+        if (requested == current) host else requested
+
+    private fun currentTopInsetOverlap(topInset: Int): Int {
+        if (options.hideTitleBar || !isAttachedToWindow) {
+            return 0
+        }
+        getLocationInWindow(windowLocation)
+        return calculateTopInsetOverlap(
+            viewTop = windowLocation[1],
+            hostTopPadding = hostTopPadding,
+            topInset = topInset,
+        )
     }
 
     private fun currentImeOverlap(): Int {
@@ -310,6 +362,14 @@ class AgentChatView internal constructor(
         }
         appliedImeBottomPadding = imeBottom
         super.setPadding(paddingLeft, paddingTop, paddingRight, hostBottomPadding + imeBottom)
+    }
+
+    internal fun applyTopInsetPadding(topInset: Int) {
+        if (topInset == appliedTopInsetPadding) {
+            return
+        }
+        appliedTopInsetPadding = topInset
+        super.setPadding(paddingLeft, hostTopPadding + topInset, paddingRight, paddingBottom)
     }
 
     private fun observeHostLifecycle() {
@@ -369,6 +429,7 @@ class AgentChatView internal constructor(
         options.showTimestamps?.let { brandMap["showTimestamps"] = it }
         options.showSpeakerLabels?.let { brandMap["showBotName"] = it }
         options.showAvatars?.let { brandMap["showAvatars"] = it }
+        options.hideBubbleTails?.let { brandMap["hideBubbleTails"] = it }
         options.agentAvatarURL?.let { brandMap["agentAvatarURL"] = it }
         options.sendButtonSVG?.let { brandMap["sendButtonSVG"] = it }
         options.sendButtonDisabledSVG?.let { brandMap["sendButtonDisabledSVG"] = it }
@@ -478,6 +539,15 @@ class AgentChatView internal constructor(
         }
         if (!options.initialUserMessage.isNullOrEmpty()) {
             urlBuilder.appendQueryParameter("initialUserMessage", options.initialUserMessage)
+        }
+        if (
+            options.initialUserMessageFrequency ==
+            InitialUserMessageFrequency.ONCE_PER_CHAT_INSTANCE
+        ) {
+            urlBuilder.appendQueryParameter(
+                "initialUserMessageFrequency",
+                options.initialUserMessageFrequency.value,
+            )
         }
         if (options.startAtTop) {
             urlBuilder.appendQueryParameter("startAtTop", "true")
@@ -1132,6 +1202,12 @@ private enum class AppStatus(val value: String) {
  */
 private fun String.escapeJsLineSeparators(): String =
     replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+
+internal fun calculateTopInsetOverlap(
+    viewTop: Int,
+    hostTopPadding: Int,
+    topInset: Int,
+): Int = (topInset - viewTop - hostTopPadding).coerceAtLeast(0)
 
 internal fun calculateImeOverlap(
     viewBottom: Int,

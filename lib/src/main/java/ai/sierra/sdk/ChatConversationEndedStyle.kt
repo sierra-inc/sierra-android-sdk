@@ -18,6 +18,8 @@ data class ChatConversationEndedStyle(
     val actionSpacing: Int? = null,
     /** Style of this conversation's new-chat button, separate from the list button. */
     val newChatButtonStyle: ChatButtonStyle? = null,
+    /** Show the conversation disclosure after the conversation ends. Defaults to true. */
+    val showDisclosure: Boolean? = null,
 ) : Parcelable {
     enum class MessageAlignment(val value: String) {
         START("start"), CENTER("center"), END("end")
@@ -26,6 +28,7 @@ data class ChatConversationEndedStyle(
     internal fun toJSONString(): String? {
         val json = mutableMapOf<String, Any?>()
         messageAlignment?.let { json["messageAlignment"] = it.value }
+        showDisclosure?.let { json["showDisclosure"] = it }
         showComposerContainer?.let { json["showComposerContainer"] = it }
         actionSpacing?.let { json["actionSpacing"] = it }
         newChatButtonStyle?.toJSON()?.takeIf { it.isNotEmpty() }?.let {
