@@ -433,6 +433,7 @@ class AgentChatView internal constructor(
         options.agentAvatarURL?.let { brandMap["agentAvatarURL"] = it }
         options.sendButtonSVG?.let { brandMap["sendButtonSVG"] = it }
         options.sendButtonDisabledSVG?.let { brandMap["sendButtonDisabledSVG"] = it }
+        options.uploadButtonIconSVG?.let { brandMap["uploadButtonIconSVG"] = it }
         // If locale auto-detect or server-configured chat strings are enabled, remove any messages
         // that are set to their default value so server-configured values or locale defaults can win.
         if (options.shouldOmitDefaultChatStrings()) {

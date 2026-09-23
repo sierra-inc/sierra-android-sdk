@@ -960,11 +960,13 @@ internal fun applySvpAuthentication(
     config: AgentConfig
 ) {
     val oauthAccessToken = config.oauthAccessToken
+    @Suppress("DEPRECATION")
     val headlessAPIToken = config.headlessAPIToken
     if (!oauthAccessToken.isNullOrEmpty()) {
         requestBuilder.header("Authorization", "Bearer $oauthAccessToken")
         requestBuilder.header("X-Sierra-Token-Version", "2")
     } else if (!headlessAPIToken.isNullOrEmpty()) {
+        Log.w(VOICE_TAG, "headlessAPIToken is deprecated. If you use a Headless API token, fetch it from your backend at runtime instead of shipping it in the app binary. Prefer oauthAccessToken.")
         requestBuilder.header("Authorization", "Bearer $headlessAPIToken")
     }
 }

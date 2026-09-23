@@ -23,15 +23,21 @@ data class AgentConfig(
     var apiHost: AgentAPIHost = AgentAPIHost.PROD,
     val persistence: PersistenceMode = PersistenceMode.MEMORY,
     /**
-     * Headless API token used for SVP voice connections. Set either this or [oauthAccessToken],
-     * never both. Not needed for chat.
+     * Headless API token used for SVP voice connections. Not needed for chat.
+     *
+     * Deprecated: prefer [oauthAccessToken]. If you use a Headless API token, fetch it from your
+     * backend at runtime instead of shipping it in the app binary, so you can rotate it without an
+     * app release.
      */
+    @Deprecated(
+        "If you use a Headless API token, fetch it from your backend at runtime instead of shipping it in the app binary. Prefer oauthAccessToken."
+    )
     val headlessAPIToken: String? = null,
     /**
-     * Short-lived OAuth access token with the Voice scope used for SVP voice connections. Set
-     * either this or [headlessAPIToken], never both. Have your backend exchange the OAuth client
-     * configured in Agent Studio; do not embed its secret. This token is not saved in Android
-     * fragment state; mint a fresh token when recreating a controller after process death.
+     * Short-lived OAuth access token with the Voice scope used for SVP voice connections. Have
+     * your backend exchange the OAuth client configured in Agent Studio; do not embed its secret.
+     * This token is not saved in Android fragment state; mint a fresh token when recreating a
+     * controller after process death.
      */
     @IgnoredOnParcel
     val oauthAccessToken: String? = null

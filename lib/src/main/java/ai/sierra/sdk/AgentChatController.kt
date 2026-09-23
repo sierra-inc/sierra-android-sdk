@@ -120,7 +120,8 @@ data class AgentChatControllerOptions(
 
     /**
      * Use styling configured on the server (colors, typography, logo, etc.).
-     * When enabled, server-configured styles take precedence over local chatStyle.
+     * When enabled, non-empty server-configured style fields take precedence over the corresponding
+     * local fields. Local values remain as fallbacks.
      */
     val useConfiguredStyle: Boolean = false,
 
@@ -202,15 +203,15 @@ data class AgentChatControllerOptions(
 
     /**
      * Inline SVG markup for the chat send button. Replaces the default send arrow (including
-     * its background) when provided. Overridden by the server-configured value if useConfiguredStyle
-     * is true.
+     * its background) when provided. When both the SDK and server provide a value, the
+     * server-configured value takes precedence if useConfiguredStyle is true.
      */
     var sendButtonSVG: String? = null,
 
     /**
      * Inline SVG markup for the send button when it is disabled (e.g. the input is empty).
-     * Falls back to sendButtonSVG when not provided. Overridden by the server-configured value
-     * if useConfiguredStyle is true.
+     * Falls back to sendButtonSVG when not provided. When both the SDK and server provide a value,
+     * the server-configured value takes precedence if useConfiguredStyle is true.
      */
     var sendButtonDisabledSVG: String? = null,
 
@@ -327,15 +328,15 @@ data class AgentChatControllerOptions(
     var removeInputDivider: Boolean = false,
 
     /**
-     * Whether to show timestamps on chat messages. When null and
-     * useConfiguredStyle is true, the server-configured value is used.
+     * Whether to show timestamps on chat messages. When useConfiguredStyle is true, a non-default
+     * server-configured value takes precedence over this local value.
      */
     var showTimestamps: Boolean? = null,
 
     /**
-     * Whether to show speaker labels (e.g. the agent name) on chat messages.
-     * When null and useConfiguredStyle is true, the server-configured value is
-     * used.
+     * Whether to show speaker labels (e.g. the agent name) on chat messages. When
+     * useConfiguredStyle is true, a non-default server-configured value takes precedence over this
+     * local value.
      */
     var showSpeakerLabels: Boolean? = null,
 
@@ -343,23 +344,23 @@ data class AgentChatControllerOptions(
      * Whether to show per-message avatars for agents. When enabled, the chat
      * shows avatars next to live agent messages using image URLs provided by
      * the contact center. If agentAvatarURL is also set, that image is shown
-     * next to virtual agent messages. When null and useConfiguredStyle is true,
-     * the server-configured value is used.
+     * next to virtual agent messages. When useConfiguredStyle is true, a non-default
+     * server-configured value takes precedence over this local value.
      */
     var showAvatars: Boolean? = null,
 
     /**
      * HTTPS URL of an image to show next to virtual agent messages when
      * showAvatars is enabled. Values are trimmed and must be 2048 characters or
-     * fewer. When null and useConfiguredStyle is true, the server-configured
-     * value is used.
+     * fewer. When useConfiguredStyle is true, a non-empty server-configured value takes precedence
+     * over this local value.
      */
     var agentAvatarURL: String? = null,
 
     /**
      * Controls whether the message label (speaker name and timestamp) is shown
-     * above or below chat message bubbles. When DEFAULT and useConfiguredStyle
-     * is true, the server-configured value is used.
+     * above or below chat message bubbles. When useConfiguredStyle is true, a non-default
+     * server-configured value takes precedence over this local value.
      */
     var messageLabelPlacement: MessageLabelPlacement = MessageLabelPlacement.DEFAULT,
 
@@ -434,8 +435,20 @@ data class AgentChatControllerOptions(
     /** Layout of the ended message and its optional new-conversation action. */
     var conversationEndedStyle: ChatConversationEndedStyle? = null,
 
-    /** Whether to hide all chat bubble tails. Null uses the server-configured value. */
+    /**
+     * Whether to hide all chat bubble tails. When useConfiguredStyle is true, a non-default
+     * server-configured value takes precedence over this local value.
+     */
     var hideBubbleTails: Boolean? = null,
+
+    /**
+     * Inline SVG markup for the file upload button icon. Replaces only the default
+     * photo/paperclip glyph; the button keeps its behavior and accessible label. Paths that use
+     * `currentColor` (or omit a fill) take chatStyle.colors.uploadButtonIcon; explicit SVG colors
+     * win. When both the SDK and server provide a value, the server-configured value takes
+     * precedence if useConfiguredStyle is true.
+     */
+    var uploadButtonIconSVG: String? = null,
 ) : Parcelable {
     companion object {
         // A baseline instance with the hardcoded English defaults, used to detect which
