@@ -282,6 +282,13 @@ data class ChatStyleColors(
 
     /** Human-agent bubble border color. Defaults to `assistantBubbleBorder`. */
     @ColorInt val humanAgentBubbleBorder: Int? = null,
+
+    /**
+     * The message composer border color while the input is focused. Only applies when
+     * [ChatComposerStyle] gives the composer its own surface and sets `borderWidth`. When null,
+     * `inputBorder` remains in use while focused.
+     */
+    @ColorInt val inputFocusBorder: Int? = null,
 ) : Parcelable {
     @RestrictTo(RestrictTo.Scope.LIBRARY_GROUP)
     public fun toJSON(): Map<String, String> {
@@ -292,6 +299,7 @@ data class ChatStyleColors(
             "border" to border,
             "inputBackground" to inputBackground,
             "inputBorder" to inputBorder,
+            "inputFocusBorder" to inputFocusBorder,
             "inputText" to inputText,
             "titleBar" to titleBar,
             "titleBarText" to titleBarText,

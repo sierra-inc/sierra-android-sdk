@@ -5,6 +5,7 @@ package ai.sierra.sdk
 import android.net.Uri
 import android.os.Looper
 import androidx.fragment.app.FragmentActivity
+import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -83,6 +84,40 @@ class AgentChatFragmentCompatibilityTest {
         val restoredView = restored.requireView() as AgentChatView
         assertEquals(android.view.View.GONE, restoredView.loadingSpinner().visibility)
         assertNull(shadowOf(restoredView.chatWebView()).lastLoadedUrl)
+    }
+
+    @Test
+    fun identifiedFragmentRestoresSameConversationWithCleanUrlAndIdentityHeader() {
+        val controller = createController(
+            AgentChatControllerOptions(name = "Test Agent", userIdentityToken = "identity-token"),
+        )
+        val original = addFragment(controller)
+        val originalView = original.requireView() as AgentChatView
+        val originalBridge = shadowOf(originalView.chatWebView()).getJavascriptInterface("AndroidSDK")
+        originalBridge.javaClass.getMethod("onConversationStart", String::class.java)
+            .invoke(originalBridge, "conv-live-123")
+        originalView.setPageLoaded(true)
+        val savedState = activity.supportFragmentManager.saveFragmentInstanceState(original)
+        activity.supportFragmentManager.beginTransaction().remove(original).commitNow()
+
+        val restored = controller.createFragment() as AgentChatFragment
+        restored.setInitialSavedState(savedState)
+        activity.supportFragmentManager.beginTransaction()
+            .add(android.R.id.content, restored)
+            .commitNow()
+
+        val webView = shadowOf((restored.requireView() as AgentChatView).chatWebView())
+        val url = Uri.parse(requireNotNull(webView.lastLoadedUrl))
+        assertNull(url.getQueryParameter("userIdentityToken"))
+        assertNull(url.getQueryParameter("conversationID"))
+        assertEquals("identity-token", webView.lastAdditionalHttpHeaders["X-Sierra-User-Identity-Token"])
+        // PersistenceMode.NONE has no storage to resume from, so the bridge bootstrap must carry
+        // the live conversation or recreation silently starts a new one.
+        val bridge = webView.getJavascriptInterface("AndroidSDK")
+        val target = JSONObject(bridge.javaClass.getMethod("getInitialConversation").invoke(bridge) as String)
+            .getJSONObject("target")
+        assertEquals("conversationID", target.getString("kind"))
+        assertEquals("conv-live-123", target.getString("conversationID"))
     }
 
     @Test

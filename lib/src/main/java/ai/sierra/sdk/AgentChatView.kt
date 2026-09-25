@@ -107,6 +107,14 @@ class AgentChatView internal constructor(
     private var hostResumed = false
     private var embedOpened = false
     private var reportedAppStatus: AppStatus? = null
+    // Written on the main thread and read by the WebView JavaScript bridge thread.
+    @Volatile
+    private var currentUserIdentityToken = options.userIdentityToken?.takeIf { it.isNotEmpty() }
+    // What a recreated view resumes. Replaced as a whole (on the main thread during restore, then
+    // on the bridge thread) and snapshotted on the main thread, so a save never observes a
+    // half-applied transition.
+    @Volatile
+    private var resumeState = ResumeState()
     private var disposed = false
     private var initializeOnAttach = false
     private var initializationPosted = false
@@ -249,6 +257,7 @@ class AgentChatView internal constructor(
                     chatView = this@AgentChatView,
                     webView = this,
                     conversationOptions = options.conversationOptions,
+                    initialConversation = ::buildInitialConversation,
                     onConversationEndedInternal = onConversationEndedInternal,
                 ),
                 "AndroidSDK",
@@ -271,7 +280,10 @@ class AgentChatView internal constructor(
             return
         }
 
-        webView.loadUrl(buildChatUrl())
+        val headers = currentUserIdentityToken?.let {
+            mapOf("X-Sierra-User-Identity-Token" to it)
+        } ?: emptyMap()
+        webView.loadUrl(buildChatUrl(), headers)
     }
 
     /** Initializes after hierarchy state restoration has a chance to run. */
@@ -403,6 +415,25 @@ class AgentChatView internal constructor(
                 initialize()
             }
         }
+    }
+
+    private fun buildInitialConversation(): String {
+        val target = JSONObject().put("kind", "none")
+        val identity = currentUserIdentityToken
+        val resume = resumeState
+        val resumeConversationID = resume.activeConversationID
+        if (identity != null && !resumeConversationID.isNullOrEmpty()) {
+            target.put("kind", "conversationID").put("conversationID", resumeConversationID)
+        } else if (!resume.initialConversationConsumed) {
+            if (!conversationState.isNullOrEmpty()) {
+                target.put("kind", "state").put("state", conversationState)
+            } else if (identity != null && !conversationID.isNullOrEmpty()) {
+                target.put("kind", "conversationID").put("conversationID", conversationID)
+            }
+        }
+        return JSONObject().put("target", target).apply {
+            identity?.let { put("userIdentityToken", it) }
+        }.toString()
     }
 
     private fun buildChatUrl(): String {
@@ -604,22 +635,12 @@ class AgentChatView internal constructor(
         options.textDirection?.let {
             urlBuilder.appendQueryParameter("textDirection", it.value)
         }
-        if (!options.userIdentityToken.isNullOrEmpty()) {
-            urlBuilder.appendQueryParameter("userIdentityToken", options.userIdentityToken)
-        }
-        if (!conversationState.isNullOrEmpty()) {
-            urlBuilder.appendQueryParameter("state", conversationState)
-        } else if (!conversationID.isNullOrEmpty()) {
-            if (!options.userIdentityToken.isNullOrEmpty()) {
-                urlBuilder.appendQueryParameter("conversationID", conversationID)
-            } else {
-                Log.w(TAG, "conversationID requires userIdentityToken; ignoring conversationID")
-            }
-        }
         if (options.enableConversationList) {
             urlBuilder.appendQueryParameter("enableConversationList", "true")
         }
-        if (options.showConversationListByDefault) {
+        // A recreated view reopens the conversation list when the user was looking at it: the embed
+        // only initializes the list from this flag, and the bridge target is "none" by then.
+        if (options.showConversationListByDefault || resumeState.conversationListShown) {
             urlBuilder.appendQueryParameter("showConversationListByDefault", "true")
         }
         if (options.updateVariablesAndSecretsOnSessionResume) {
@@ -639,11 +660,17 @@ class AgentChatView internal constructor(
     internal fun saveState(outState: Bundle) {
         webView.saveState(outState)
         outState.putBoolean(STATE_PAGE_LOADED, pageLoaded)
+        outState.putBoolean(STATE_BRIDGE_BOOTSTRAP, true)
         outState.putParcelable(
             STATE_ARGS,
             AgentChatFragmentArgs(agentConfig, options, conversationState),
         )
         outState.putString(STATE_CONVERSATION_ID, conversationID)
+        outState.putString(STATE_USER_IDENTITY_TOKEN, currentUserIdentityToken)
+        val resume = resumeState
+        outState.putString(STATE_ACTIVE_CONVERSATION_ID, resume.activeConversationID)
+        outState.putBoolean(STATE_INITIAL_CONVERSATION_CONSUMED, resume.initialConversationConsumed)
+        outState.putBoolean(STATE_CONVERSATION_LIST_SHOWN, resume.conversationListShown)
         storage?.getAll()?.let { outState.putSerializable(STATE_STORAGE, HashMap(it)) }
     }
 
@@ -670,17 +697,46 @@ class AgentChatView internal constructor(
 
     private fun restoreCompatibleState(savedInstanceState: Bundle): Boolean {
         val args = AgentChatFragmentArgs(agentConfig, options, conversationState)
+        val savedArgs = savedInstanceState.getParcelable<AgentChatFragmentArgs>(STATE_ARGS)
+        val sameConversationInputs =
+            savedInstanceState.getString(STATE_CONVERSATION_ID) == conversationID &&
+                savedArgs?.conversationState == conversationState
+        val sameIdentity = savedArgs?.options?.userIdentityToken == options.userIdentityToken
+        // A token refreshed through the bridge, and where the user got to with it, outlive the
+        // document they were issued in, as long as the host did not hand this view a different
+        // identity, agent, or conversation than it saved. A different identity starts over, so
+        // its own conversationState / conversationID is honored again.
+        if (sameIdentity && savedInstanceState.containsKey(STATE_USER_IDENTITY_TOKEN)) {
+            currentUserIdentityToken = savedInstanceState.getString(STATE_USER_IDENTITY_TOKEN)
+                ?.takeIf { it.isNotEmpty() }
+        }
+        if (sameIdentity && sameConversationInputs && savedArgs?.agentConfig == agentConfig) {
+            resumeState = ResumeState(
+                activeConversationID = savedInstanceState.getString(STATE_ACTIVE_CONVERSATION_ID)
+                    ?.takeIf { it.isNotEmpty() },
+                initialConversationConsumed =
+                    savedInstanceState.getBoolean(STATE_INITIAL_CONVERSATION_CONSUMED),
+                conversationListShown =
+                    savedInstanceState.getBoolean(STATE_CONVERSATION_LIST_SHOWN),
+            )
+        }
         // Preserve the WebView document across configuration changes when the SDK inputs are
         // unchanged. Hosts that rebuild options with new adaptive colors still fall through to
         // loadUrl below because the saved args no longer match the current args.
         if (!savedInstanceState.getBoolean(STATE_PAGE_LOADED) ||
-            savedInstanceState.getParcelable<AgentChatFragmentArgs>(STATE_ARGS) != args ||
-            savedInstanceState.getString(STATE_CONVERSATION_ID) != conversationID
+            savedArgs != args ||
+            !sameConversationInputs
         ) {
             return false
         }
-        pageLoaded = true
         restoreStorage(savedInstanceState)
+        // Old history can contain credentials in its URL. Identified navigations must also
+        // reattach the SSR identity header instead of relying on WebView's saved request state, so
+        // they reload through loadUrl and resume activeConversationID through the bridge.
+        if (!savedInstanceState.getBoolean(STATE_BRIDGE_BOOTSTRAP) || currentUserIdentityToken != null) {
+            return false
+        }
+        pageLoaded = true
         showWebContent()
         webView.restoreState(savedInstanceState)
         return true
@@ -727,6 +783,69 @@ class AgentChatView internal constructor(
 
     internal fun setPageLoaded(loaded: Boolean) {
         pageLoaded = loaded
+    }
+
+    internal fun setCurrentUserIdentityToken(token: String?) {
+        currentUserIdentityToken = token?.takeIf { it.isNotEmpty() }
+    }
+
+    internal fun setActiveConversationID(id: String?) {
+        resumeState = resumeState.copy(
+            activeConversationID = id?.takeIf { it.isNotEmpty() },
+            conversationListShown = false,
+        )
+    }
+
+    /**
+     * Drops the conversation the view was created to resume. The conversation list stays as it is:
+     * the embed persists a record without a conversation ID while resetting for a new chat, and
+     * that write can land after the list callbacks.
+     */
+    internal fun leaveInitialConversation() {
+        resumeState = resumeState.copy(activeConversationID = null, initialConversationConsumed = true)
+    }
+
+    /**
+     * The embed clears its store when it leaves a conversation: before it reports the list opening
+     * (which sets the flag again right after) and when a new chat starts from the list (before the
+     * list reports hiding). Dropping the list flag here keeps a save in that second window from
+     * recreating onto the list.
+     */
+    internal fun onEmbedClearedStorage() {
+        resumeState = ResumeState(initialConversationConsumed = true)
+    }
+
+    /** Opening the list also leaves the initial conversation; both land in one snapshot. */
+    internal fun markConversationListShown() {
+        resumeState = ResumeState(
+            activeConversationID = null,
+            initialConversationConsumed = true,
+            conversationListShown = true,
+        )
+    }
+
+    internal fun markConversationListHidden() {
+        resumeState = resumeState.copy(conversationListShown = false)
+    }
+
+    /**
+     * Mirrors the embed's persisted conversation record. Starting a new chat resets the embed's
+     * state and persists a record without a conversation ID before the new conversation reports
+     * one, so the native mirror must drop the old ID at the same time or a recreation in that
+     * window would resume the abandoned conversation.
+     */
+    internal fun onEmbedStoredValue(key: String, value: String) {
+        if (key != persistedConversationKey(agentConfig.token)) {
+            return
+        }
+        val persistedConversationID = try {
+            JSONObject(value).optString(PERSISTED_CONVERSATION_ID_FIELD)
+        } catch (e: JSONException) {
+            ""
+        }
+        if (persistedConversationID.isEmpty()) {
+            leaveInitialConversation()
+        }
     }
 
     internal fun onHostResume() {
@@ -978,6 +1097,7 @@ private class ChatWebViewInterface(
     private val chatView: AgentChatView,
     private val webView: WebView,
     private val conversationOptions: ConversationOptions?,
+    private val initialConversation: () -> String,
     private val onConversationEndedInternal: (() -> Unit)?,
 ) {
     private val handler = Handler(Looper.getMainLooper())
@@ -1087,6 +1207,7 @@ private class ChatWebViewInterface(
 
     @JavascriptInterface
     fun onConversationStart(conversationID: String) {
+        chatView.setActiveConversationID(conversationID)
         listener?.onConversationStart(conversationID)
     }
 
@@ -1108,11 +1229,13 @@ private class ChatWebViewInterface(
 
     @JavascriptInterface
     fun onShowConversationList() {
+        chatView.markConversationListShown()
         listener?.onShowConversationList()
     }
 
     @JavascriptInterface
     fun onHideConversationList() {
+        chatView.markConversationListHidden()
         listener?.onHideConversationList()
     }
 
@@ -1123,6 +1246,7 @@ private class ChatWebViewInterface(
 
     @JavascriptInterface
     fun storeValue(key: String, value: String) {
+        chatView.onEmbedStoredValue(key, value)
         storage?.setItem(key, value)
     }
 
@@ -1131,8 +1255,12 @@ private class ChatWebViewInterface(
 
     @JavascriptInterface
     fun clearStorage() {
+        chatView.onEmbedClearedStorage()
         storage?.clear()
     }
+
+    @JavascriptInterface
+    fun getInitialConversation(): String = initialConversation()
 
     /**
      * Returns the initial agent memory (variables and secrets) as a JSON string. These are
@@ -1161,11 +1289,17 @@ private class ChatWebViewInterface(
     @JavascriptInterface
     fun onUserIdentityTokenExpiry(callbackId: String) {
         listener?.onUserIdentityTokenExpiry { result ->
-            resolveCallback(callbackId, result)
+            resolveCallback(callbackId, result) { token ->
+                chatView.setCurrentUserIdentityToken(token)
+            }
         }
     }
 
-    private fun resolveCallback(callbackId: String, result: SecretExpiryResult) {
+    private fun resolveCallback(
+        callbackId: String,
+        result: SecretExpiryResult,
+        onSuccess: ((String?) -> Unit)? = null,
+    ) {
         val jsCode = when (result) {
             is SecretExpiryResult.Success -> {
                 val valueJSON = result.value?.let { JSONObject.quote(it) } ?: "null"
@@ -1175,14 +1309,48 @@ private class ChatWebViewInterface(
                 "window.__sierraAndroidResolveCallback(${JSONObject.quote(callbackId)}, null, ${JSONObject.quote(result.message)});"
             }
         }
-        handler.post { webView.evaluateJavascript(jsCode, null) }
+        handler.post {
+            if (result is SecretExpiryResult.Success) {
+                onSuccess?.invoke(result.value)
+            }
+            webView.evaluateJavascript(jsCode, null)
+        }
     }
 }
 
 private const val TAG = "AgentChatView"
 private const val STATE_PAGE_LOADED = "pageLoaded"
+private const val STATE_BRIDGE_BOOTSTRAP = "bridgeBootstrap"
 private const val STATE_ARGS = "args"
 private const val STATE_CONVERSATION_ID = "conversationID"
+private const val STATE_USER_IDENTITY_TOKEN = "userIdentityToken"
+/**
+ * What a recreated [AgentChatView] resumes.
+ *
+ * @param activeConversationID The conversation the embed reported through onConversationStart.
+ *   Identified recreations resume it through the bridge.
+ * @param initialConversationConsumed Set once the user leaves the conversation the view was created
+ *   to resume (the conversation list, a new chat, or the embed clearing its store). After that a
+ *   recreation must not replay the original conversationState / conversationID. Resolution alone
+ *   does not consume it: the embed keeps resolved credentials in memory rather than in the native
+ *   store, so for an anonymous state resume the state stays the only durable way back into the
+ *   conversation.
+ * @param conversationListShown Whether the embed is showing the conversation list. A recreation
+ *   loads the list again instead of a new chat; selecting or starting a conversation clears it.
+ */
+private data class ResumeState(
+    val activeConversationID: String? = null,
+    val initialConversationConsumed: Boolean = false,
+    val conversationListShown: Boolean = false,
+)
+
+private const val STATE_ACTIVE_CONVERSATION_ID = "activeConversationID"
+private const val STATE_INITIAL_CONVERSATION_CONSUMED = "initialConversationConsumed"
+private const val STATE_CONVERSATION_LIST_SHOWN = "conversationListShown"
+private const val PERSISTED_CONVERSATION_ID_FIELD = "conversationID"
+
+// The storage key under which the web embed persists its conversation record.
+private fun persistedConversationKey(token: String): String = "embed-chat-$token"
 private const val STATE_STORAGE = "storage"
 /**
  * How long to keep the spinner up for a resumed conversation while waiting for

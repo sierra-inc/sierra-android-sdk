@@ -44,8 +44,8 @@ data class ChatComposerInsets(
  * from the edges of the chat and moves the input background onto the composer itself, so the
  * inset gutter shows the chat background.
  *
- * Composer colors stay on [ChatStyleColors]: `inputBackground`, `inputBorder`, `inputText`, and
- * `inputPlaceholder`.
+ * Composer colors stay on [ChatStyleColors]: `inputBackground`, `inputBorder`,
+ * `inputFocusBorder`, `inputText`, and `inputPlaceholder`.
  */
 @Parcelize
 data class ChatComposerStyle(
