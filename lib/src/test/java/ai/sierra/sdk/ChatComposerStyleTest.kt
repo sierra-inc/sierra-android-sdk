@@ -67,6 +67,7 @@ class ChatComposerStyleTest {
             cornerRadius = 25,
             borderWidth = 1,
             actionButtonSize = 28,
+            actionIconSize = 29,
         )
 
         // Nested insets have to survive as JSON objects, not stringified maps.
@@ -78,5 +79,6 @@ class ChatComposerStyleTest {
         assertEquals(25, json.getInt("cornerRadius"))
         assertEquals(1, json.getInt("borderWidth"))
         assertEquals(28, json.getInt("actionButtonSize"))
+        assertEquals(29, json.getInt("actionIconSize"))
     }
 }

@@ -72,6 +72,12 @@ data class ChatComposerStyle(
 
     /** Width and height of the send and upload buttons. */
     val actionButtonSize: Int? = null,
+
+    /**
+     * Width and height of the send and upload button glyphs. The rendered size is clamped to the
+     * effective action button size. Does not resize SVGs that replace the complete send button.
+     */
+    val actionIconSize: Int? = null,
 ) : Parcelable {
     @RestrictTo(RestrictTo.Scope.LIBRARY_GROUP)
     public fun toJSON(): Map<String, Any?> {
@@ -84,6 +90,7 @@ data class ChatComposerStyle(
         cornerRadius?.let { json["cornerRadius"] = it }
         borderWidth?.let { json["borderWidth"] = it }
         actionButtonSize?.let { json["actionButtonSize"] = it }
+        actionIconSize?.let { json["actionIconSize"] = it }
         return json
     }
 
