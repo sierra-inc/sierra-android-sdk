@@ -67,6 +67,7 @@ private val DEFAULT_MUTE_CONTROL_BACKGROUND_COLOR: Int = Color.parseColor("#E7E7
 private val DEFAULT_MUTE_CONTROL_ICON_COLOR: Int = Color.parseColor("#111111")
 private val DEFAULT_END_CALL_CONTROL_BACKGROUND_COLOR: Int = Color.rgb(242, 75, 39)
 private val DEFAULT_USER_BUBBLE_COLOR: Int = Color.rgb(52, 138, 210)
+private const val USER_CONVERSATION_EVENT_ROLE = "user"
 
 public data class AgentAttachment(
     val type: String,
@@ -87,7 +88,18 @@ public interface VoiceCallbacks : AgentEventListener {
     public fun onVoiceDismissed() {}
 
     public fun onVoiceError(error: Throwable)
-    public fun onAgentAttachment(attachments: List<AgentAttachment>) {}
+
+    /**
+     * Called when the agent sends attachments. With `enableTextInput` on, this includes
+     * attachments on human agent messages.
+     */
+    public fun onAgentAttachments(attachments: List<AgentAttachment>) {}
+
+    /**
+     * Called when the user sends attachments. Fires only when `enableTextInput` is on, because
+     * user attachments arrive on conversation events.
+     */
+    public fun onUserAttachments(attachments: List<AgentAttachment>) {}
     public fun onSessionInfoReceived(conversationID: String, encryptionKey: String?) {}
     public fun onResumeTokenReceived(token: String) {}
 }
@@ -1818,7 +1830,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         val agentAttachments = renderableAttachments.toAgentAttachments()
 
         if (agentAttachments.isNotEmpty()) {
-            voiceCallbacks?.onAgentAttachment(agentAttachments)
+            voiceCallbacks?.onAgentAttachments(agentAttachments)
         }
 
         if (rendererFailed) {
@@ -1852,9 +1864,14 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
                 Log.w(VOICE_TAG, "Received secret_refresh attachment but no orchestrator is registered")
             }
         }
-        val agentAttachments = renderableAttachments.toAgentAttachments()
-        if (agentAttachments.isNotEmpty()) {
-            voiceCallbacks?.onAgentAttachment(agentAttachments)
+        val parsedAttachments = renderableAttachments.toAgentAttachments()
+        if (parsedAttachments.isEmpty()) {
+            return
+        }
+        if (event.role == USER_CONVERSATION_EVENT_ROLE) {
+            voiceCallbacks?.onUserAttachments(parsedAttachments)
+        } else {
+            voiceCallbacks?.onAgentAttachments(parsedAttachments)
         }
     }
 

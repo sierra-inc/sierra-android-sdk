@@ -57,7 +57,16 @@ public class AgentVoiceChatCoordinator(
         public fun onVoiceError(coord: AgentVoiceChatCoordinator, error: Throwable) {}
 
         /** Called when the voice session receives agent-produced attachments. */
-        public fun onAgentAttachment(
+        public fun onAgentAttachments(
+            coord: AgentVoiceChatCoordinator,
+            attachments: List<AgentAttachment>
+        ) {}
+
+        /**
+         * Called when the voice session receives user-sent attachments. Fires only when the voice
+         * options enable text input.
+         */
+        public fun onUserAttachments(
             coord: AgentVoiceChatCoordinator,
             attachments: List<AgentAttachment>
         ) {}
@@ -239,8 +248,12 @@ public class AgentVoiceChatCoordinator(
         delegate?.onVoiceError(this, error)
     }
 
-    override fun onAgentAttachment(attachments: List<AgentAttachment>) {
-        delegate?.onAgentAttachment(this, attachments)
+    override fun onAgentAttachments(attachments: List<AgentAttachment>) {
+        delegate?.onAgentAttachments(this, attachments)
+    }
+
+    override fun onUserAttachments(attachments: List<AgentAttachment>) {
+        delegate?.onUserAttachments(this, attachments)
     }
 
     override fun onSecretExpiry(secretName: String, replyHandler: (SecretExpiryResult) -> Unit) {
