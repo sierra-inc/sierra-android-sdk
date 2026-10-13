@@ -56,6 +56,18 @@ public class AgentVoiceChatCoordinator(
         /** Called when the voice session encounters an error. */
         public fun onVoiceError(coord: AgentVoiceChatCoordinator, error: Throwable) {}
 
+        /**
+         * Called on the main thread once the voice controller created via [makeVoiceController] can
+         * accept [AgentVoiceController.sendUserMessage].
+         */
+        public fun coordinatorVoiceMessageSendReady(coord: AgentVoiceChatCoordinator) {}
+
+        /** Called when the voice connection dropped and the SDK started reconnecting. */
+        public fun coordinatorVoiceDidStartReconnecting(coord: AgentVoiceChatCoordinator) {}
+
+        /** Called when the SDK reconnected after [coordinatorVoiceDidStartReconnecting]. */
+        public fun coordinatorVoiceDidReconnect(coord: AgentVoiceChatCoordinator) {}
+
         /** Called when the voice session receives agent-produced attachments. */
         public fun onAgentAttachments(
             coord: AgentVoiceChatCoordinator,
@@ -246,6 +258,18 @@ public class AgentVoiceChatCoordinator(
     override fun onVoiceError(error: Throwable) {
         voiceSessionErrored.set(true)
         delegate?.onVoiceError(this, error)
+    }
+
+    override fun onMessageSendReady() {
+        delegate?.coordinatorVoiceMessageSendReady(this)
+    }
+
+    override fun onVoiceReconnecting() {
+        delegate?.coordinatorVoiceDidStartReconnecting(this)
+    }
+
+    override fun onVoiceReconnected() {
+        delegate?.coordinatorVoiceDidReconnect(this)
     }
 
     override fun onAgentAttachments(attachments: List<AgentAttachment>) {

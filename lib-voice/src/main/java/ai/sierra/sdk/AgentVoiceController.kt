@@ -53,6 +53,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.res.ResourcesCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.updateLayoutParams
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -68,6 +69,7 @@ private val DEFAULT_MUTE_CONTROL_ICON_COLOR: Int = Color.parseColor("#111111")
 private val DEFAULT_END_CALL_CONTROL_BACKGROUND_COLOR: Int = Color.rgb(242, 75, 39)
 private val DEFAULT_USER_BUBBLE_COLOR: Int = Color.rgb(52, 138, 210)
 private const val USER_CONVERSATION_EVENT_ROLE = "user"
+private const val BANNER_HEIGHT_DP = 40
 
 public data class AgentAttachment(
     val type: String,
@@ -90,6 +92,15 @@ public interface VoiceCallbacks : AgentEventListener {
     public fun onVoiceError(error: Throwable)
 
     /**
+     * Called on the main thread when the voice connection drops and the SDK starts reconnecting.
+     * The SDK shows its own banner; use this only for custom UI.
+     */
+    public fun onVoiceReconnecting() {}
+
+    /** Called on the main thread when a reconnect succeeds after [onVoiceReconnecting]. */
+    public fun onVoiceReconnected() {}
+
+    /**
      * Called when the agent sends attachments. With `enableTextInput` on, this includes
      * attachments on human agent messages.
      */
@@ -102,6 +113,12 @@ public interface VoiceCallbacks : AgentEventListener {
     public fun onUserAttachments(attachments: List<AgentAttachment>) {}
     public fun onSessionInfoReceived(conversationID: String, encryptionKey: String?) {}
     public fun onResumeTokenReceived(token: String) {}
+
+    /**
+     * Called on the main thread once the voice session can accept
+     * [AgentVoiceController.sendUserMessage].
+     */
+    public fun onMessageSendReady() {}
 }
 
 private fun Map<String, Any?>.toAgentAttachment(): AgentAttachment? {
@@ -246,7 +263,13 @@ public data class AgentVoiceControllerOptions(
     /** When true, uses compact mute and end-call controls, keeping them beside the text composer. */
     var useCompactControls: Boolean = false,
     /** A signed JWT that identifies the end user for this voice session. */
-    var userIdentityToken: String? = null
+    var userIdentityToken: String? = null,
+    /** Error banner text when the server rejects the voice connection's credentials (HTTP 401/403). */
+    var voiceConnectionErrorMessage: String = "Voice connection failed: Please check your credentials or try again later",
+    /** Error banner text for every other voice failure, such as a connection that could not be restored. */
+    var voiceConnectionLostErrorMessage: String = "Voice connection lost. Please try again.",
+    /** Banner text shown while the SDK reconnects after a dropped voice connection. */
+    var voiceReconnectingMessage: String = "Reconnecting…"
 ) : Parcelable {
     @Deprecated("Use voiceAgentParameters instead.")
     @IgnoredOnParcel
@@ -438,6 +461,28 @@ public class AgentVoiceController(
     public fun endConversation(closeReason: AgentVoiceCloseReason = AgentVoiceCloseReason.NORMAL) {
         connectedFragment?.endConversation(closeReason)
     }
+
+    /**
+     * Sends a message on behalf of the user, with optional attachments, into the voice
+     * conversation. The agent treats the text as if the user had said it.
+     *
+     * Returns `false` without sending when the voice session cannot accept messages yet or has
+     * ended. Wait for [VoiceCallbacks.onMessageSendReady] before sending. `true` means the message
+     * was sent, not that the agent has processed it. Call from the main thread.
+     */
+    public fun sendUserMessage(message: String, attachments: List<UserAttachment> = emptyList()): Boolean {
+        check(Looper.myLooper() == Looper.getMainLooper()) { "sendUserMessage must be called on the main thread" }
+        return connectedFragment?.sendUserMessage(message, attachments) == true
+    }
+
+    /**
+     * Sends attachments on behalf of the user into the voice conversation. Returns `false` without
+     * sending when the voice session cannot accept messages yet or has ended. Call from the main
+     * thread.
+     */
+    public fun sendUserAttachment(attachments: List<UserAttachment>): Boolean {
+        return sendUserMessage("", attachments)
+    }
 }
 
 @Parcelize
@@ -475,6 +520,8 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
     private lateinit var placeholderLabel: TextView
     private lateinit var loadingIndicator: ProgressBar
     private lateinit var errorBanner: TextView
+    private lateinit var reconnectingBanner: TextView
+    private var toolbar: Toolbar? = null
     private var muteButton: View? = null
     private var unmuteButton: View? = null
     private var endButton: View? = null
@@ -591,9 +638,14 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         }
 
         if (!shouldHideTitleBar()) {
-            rootLayout.addView(createToolbar())
+            toolbar = createToolbar().also {
+                // The title bar may not be measured yet when the renderer goes fullscreen.
+                it.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateFullscreenRendererTopMargin() }
+            }
+            rootLayout.addView(toolbar)
         }
         rootLayout.addView(createErrorBanner())
+        rootLayout.addView(createReconnectingBanner())
         rootLayout.addView(createContentContainer(), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             0,
@@ -692,6 +744,22 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         endConversationForExit(closeReason)
     }
 
+    internal fun sendUserMessage(message: String, attachments: List<UserAttachment>): Boolean {
+        if (message.isEmpty() && attachments.isEmpty()) {
+            return false
+        }
+        val session = voiceSession?.takeIf { it.isMessageSendReady } ?: return false
+        if (message.isNotEmpty() && !session.sendTextClient(message)) {
+            return false
+        }
+        if (attachments.isNotEmpty()) {
+            return session.sendAttachmentsClient(
+                attachments.map { mapOf("type" to it.type.value, "data" to it.data) }
+            )
+        }
+        return true
+    }
+
     private fun endConversationForExit(closeReason: AgentVoiceCloseReason = AgentVoiceCloseReason.NORMAL) {
         viewModel.hasEndedConversation = true
         val retainedSession = viewModel.retainedSession
@@ -777,6 +845,10 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
             ensureRendererLoaded()
         }
         updateUIForState(session.currentState)
+        // onStartReconnecting fired for the previous view, so restore its banner here.
+        if (session.isReconnecting && controlState == ControlState.ACTIVE) {
+            setReconnectingBannerVisible(true)
+        }
     }
 
     private fun shutdownVoiceSessionIfNeeded(closeReason: AgentVoiceCloseReason = AgentVoiceCloseReason.NORMAL) {
@@ -860,18 +932,35 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
 
     private fun createErrorBanner(): TextView {
         errorBanner = TextView(requireContext()).apply {
-            setBackgroundColor(Color.parseColor("#E94E2A"))
+            setBackgroundColor(Color.parseColor("#F24B27"))
             setTextColor(Color.WHITE)
             textSize = 13f
             gravity = Gravity.CENTER
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                40.dp
+                BANNER_HEIGHT_DP.dp
             )
             setPadding(16.dp, 0, 16.dp, 0)
             visibility = View.GONE
         }
         return errorBanner
+    }
+
+    private fun createReconnectingBanner(): TextView {
+        reconnectingBanner = TextView(requireContext()).apply {
+            setBackgroundColor(DEFAULT_MUTE_CONTROL_BACKGROUND_COLOR)
+            setTextColor(DEFAULT_MUTE_CONTROL_ICON_COLOR)
+            textSize = 13f
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                BANNER_HEIGHT_DP.dp
+            )
+            setPadding(16.dp, 0, 16.dp, 0)
+            text = options.voiceReconnectingMessage
+            visibility = View.GONE
+        }
+        return reconnectingBanner
     }
 
     private fun createContentContainer(): FrameLayout {
@@ -1529,7 +1618,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
                 FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT
-                )
+                ).apply { topMargin = fullscreenRendererTopMargin() }
             )
             renderer.bringToFront()
         } else {
@@ -1544,6 +1633,28 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         renderer.visibility = visibility
         isRendererFullscreen = fullscreen
         rendererFullscreenBackCallback.isEnabled = fullscreen
+    }
+
+    private fun setReconnectingBannerVisible(visible: Boolean) {
+        reconnectingBanner.visibility = if (visible) View.VISIBLE else View.GONE
+        updateFullscreenRendererTopMargin()
+    }
+
+    private fun updateFullscreenRendererTopMargin() {
+        if (!isRendererFullscreen) {
+            return
+        }
+        val topMargin = fullscreenRendererTopMargin()
+        val renderer = rendererView ?: return
+        if ((renderer.layoutParams as? FrameLayout.LayoutParams)?.topMargin != topMargin) {
+            renderer.updateLayoutParams<FrameLayout.LayoutParams> { this.topMargin = topMargin }
+        }
+    }
+
+    /** Keeps a visible banner, and the title bar above it, uncovered by the fullscreen renderer. */
+    private fun fullscreenRendererTopMargin(): Int {
+        val isBannerVisible = reconnectingBanner.visibility == View.VISIBLE || errorBanner.visibility == View.VISIBLE
+        return if (isBannerVisible) (toolbar?.height ?: 0) + BANNER_HEIGHT_DP.dp else 0
     }
 
     private fun showLoadingState(visible: Boolean) {
@@ -1618,6 +1729,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
                 refreshActiveControls()
             }
             VoiceSessionManager.State.ENDED -> {
+                setReconnectingBannerVisible(false)
                 showLoadingState(false)
                 cancelInitialGreetingFallback()
                 latestInputAudioLevel = 0f
@@ -1673,6 +1785,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         muteLevelDisplay?.resetLevels()
         compactMuteLevelDisplay?.resetLevels()
         shutdownVoiceSessionIfNeeded()
+        setReconnectingBannerVisible(false)
         errorBanner.text = message
         errorBanner.visibility = View.VISIBLE
 
@@ -1711,10 +1824,6 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         deliverSwitchToChatIfNeeded(agentInitiated = false)
     }
 
-    private fun userFacingErrorMessage(): String {
-        return "Voice connection failed: Please check your credentials or try again later"
-    }
-
     private fun isExternalAudioInterruptionError(error: Throwable): Boolean {
         var current: Throwable? = error
         while (current != null) {
@@ -1741,6 +1850,10 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
 
     override fun onReceiveResumeToken(token: String) {
         voiceCallbacks?.onResumeTokenReceived(token)
+    }
+
+    override fun onMessageSendReady() {
+        voiceCallbacks?.onMessageSendReady()
     }
 
     override fun onReceiveInitialAudio() {
@@ -1898,7 +2011,38 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
                 endConversationForExit()
                 return@post
             }
-            showErrorState(userFacingErrorMessage())
+            // Only a 401/403 handshake points at credentials. See onConnectionError.
+            showErrorState(options.voiceConnectionLostErrorMessage)
+            voiceCallbacks?.onVoiceError(error)
+        }
+    }
+
+    override fun onStartReconnecting() {
+        mainHandler.post {
+            if (controlState == ControlState.ACTIVE) {
+                setReconnectingBannerVisible(true)
+            }
+            voiceCallbacks?.onVoiceReconnecting()
+        }
+    }
+
+    override fun onReconnect() {
+        mainHandler.post {
+            setReconnectingBannerVisible(false)
+            voiceCallbacks?.onVoiceReconnected()
+        }
+    }
+
+    override fun onConnectionError(error: Throwable, isAuthenticationFailure: Boolean) {
+        Log.e(VOICE_TAG, "Voice connection error", error)
+        mainHandler.post {
+            showErrorState(
+                if (isAuthenticationFailure) {
+                    options.voiceConnectionErrorMessage
+                } else {
+                    options.voiceConnectionLostErrorMessage
+                }
+            )
             voiceCallbacks?.onVoiceError(error)
         }
     }

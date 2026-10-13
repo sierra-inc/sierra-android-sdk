@@ -188,8 +188,9 @@ class SecretRefreshOrchestratorTest {
             memoryUpdates.add(MemoryUpdate(secrets, variables))
         }
 
-        override fun sendAttachmentsClient(attachments: List<Map<String, Any?>>) {
+        override fun sendAttachmentsClient(attachments: List<Map<String, Any?>>): Boolean {
             attachmentBatches.add(attachments)
+            return true
         }
     }
 

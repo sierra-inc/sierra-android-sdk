@@ -51,8 +51,11 @@ internal fun jsonArrayToList(arr: JSONArray): List<Any?> {
 internal fun buildVoiceOkHttpClient(
     customize: ((OkHttpClient.Builder) -> Unit)? = null,
 ): OkHttpClient {
+    // A missed pong fails the socket, which triggers the session's reconnect. Set before
+    // [customize] so the host can override it.
     val builder = OkHttpClient.Builder()
         .readTimeout(0, TimeUnit.MILLISECONDS)
+        .pingInterval(10, TimeUnit.SECONDS)
     customize?.invoke(builder)
     return builder.build()
 }

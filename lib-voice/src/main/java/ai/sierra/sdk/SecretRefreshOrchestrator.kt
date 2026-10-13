@@ -27,7 +27,7 @@ internal interface SecretRefreshVoiceSession {
         secrets: Map<String, String>? = null,
         variables: Map<String, String>? = null,
     )
-    fun sendAttachmentsClient(attachments: List<Map<String, Any?>>)
+    fun sendAttachmentsClient(attachments: List<Map<String, Any?>>): Boolean
 }
 
 internal interface SecretRefreshScheduledTask {

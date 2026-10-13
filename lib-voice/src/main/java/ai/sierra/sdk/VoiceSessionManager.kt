@@ -14,8 +14,11 @@ import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.AutomaticGainControl
 import android.media.audiofx.NoiseSuppressor
+import android.net.ConnectivityManager
+import android.net.Network
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Base64
 import android.util.Log
 import okhttp3.OkHttpClient
@@ -34,6 +37,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 import kotlin.math.max
 import kotlin.math.sqrt
+import kotlin.random.Random
 
 internal interface VoiceSessionDelegate {
     fun onReceiveCredentials(conversationID: String, encryptionKey: String?)
@@ -43,9 +47,24 @@ internal interface VoiceSessionDelegate {
     fun onStartInitialAudioPlayback() {}
     fun onChangeState(state: VoiceSessionManager.State)
     fun onError(error: Throwable)
+
+    /**
+     * The voice connection failed and was not recovered. [isAuthenticationFailure] is true when the
+     * server rejected the handshake with HTTP 401 or 403.
+     */
+    fun onConnectionError(error: Throwable, isAuthenticationFailure: Boolean) {
+        onError(error)
+    }
     fun onEnd()
+
+    /** The connection was lost and the first reconnect attempt is scheduled. */
+    fun onStartReconnecting() {}
+
+    /** A reconnect reached `opened` after [onStartReconnecting]. */
+    fun onReconnect() {}
     fun onContinueInChat() {}
     fun onReceiveResumeToken(token: String) {}
+    fun onMessageSendReady() {}
     fun onUpdateInputAudioLevel(level: Float) {}
     fun onUpdateOutputAudioLevel(level: Float) {}
 
@@ -123,6 +142,9 @@ internal class VoiceSessionManager(
 
     private val conversationId: String = conversationId ?: UUID.randomUUID().toString()
     @Volatile private var resumeToken: String? = resumeToken
+    // At this SDK's compatibility date the server resumes only when `open` carries a token, so a
+    // session without a host token is fresh even when [resumeConversation] is set.
+    private val startedAsResume: Boolean = !resumeToken.isNullOrEmpty()
 
     enum class State {
         CONNECTING,
@@ -133,6 +155,13 @@ internal class VoiceSessionManager(
 
     val currentState: State
         get() = state
+
+    /**
+     * The server rejects `text_client` and `attachments_client` before `opened` by ending the
+     * call. The session reaches [State.LISTENING] only after `opened`.
+     */
+    val isMessageSendReady: Boolean
+        get() = state.let { it == State.LISTENING || it == State.SPEAKING }
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val stateLock = Any()
@@ -157,7 +186,7 @@ internal class VoiceSessionManager(
 
     private val msgNum = AtomicInteger(0)
     @Volatile private var isSessionRunning = false
-    private var hasDeliveredSessionInfo = false
+    @Volatile private var hasDeliveredSessionInfo = false
     @Volatile private var hasDeliveredInitialAudioMessage = false
     @Volatile private var hasDeliveredInitialAudioPlayback = false
     @Volatile private var isUserListeningPaused = false
@@ -165,7 +194,53 @@ internal class VoiceSessionManager(
     @Volatile private var isSpeakingMuted = false
 
     private val okHttpClient = buildVoiceOkHttpClient(customize = customizeOkHttpClient)
-    private var webSocket: WebSocket? = null
+    @Volatile private var webSocket: WebSocket? = null
+
+    // Incremented for each new socket and on disconnect, so callbacks from a replaced socket are
+    // ignored.
+    private val connectionGeneration = AtomicInteger(0)
+
+    // Held while the generation changes and while a socket callback checks it and applies its
+    // effects, so a callback from a replaced socket has no effect after the replacement. Never
+    // held across audio teardown or delegate calls.
+    private val connectionLock = Any()
+
+    // The server ends the session if it receives anything other than `open` before `opened`, so
+    // every other outgoing message is dropped until the current socket has received `opened`.
+    @Volatile private var isConnectionOpen = false
+
+    // The server keeps the token from the connection that created the conversation and issues an
+    // unusable one in `opened` on a resume, so a resumed connection keeps the token it sent.
+    @Volatile private var isResumedConnection = false
+
+    // True from a reconnect socket's `open` until it receives a server message other than
+    // `opened`. The server reports a reconnect it cannot set up (for example a resume of a
+    // conversation it no longer has) with an error `end_conversation` right after `opened`.
+    @Volatile private var isAwaitingReconnectTraffic = false
+
+    // Main thread only.
+    private var hasDeliveredMessageSendReady = false
+    private var reconnectAttempt = 0
+    private var connectionOpenedAtMillis: Long? = null
+    var isReconnecting = false
+        private set
+    private val reconnectRunnable = Runnable { reconnect() }
+    private var openTimeout: Runnable? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
+    // Set while a lost connection waits for the device to rejoin a network, to the connection
+    // generation at the drop, so a network callback after a disconnect is ignored.
+    private var networkWaitGeneration: Int? = null
+
+    // When the connection was first lost since the last `opened`. The network wait ends
+    // [NETWORK_WAIT_TIMEOUT_MILLIS] after this, however often the network comes and goes.
+    private var connectionLostAtMillis: Long? = null
+    private val networkWaitDeadline = Runnable {
+        if (networkWaitGeneration != connectionGeneration.get() || !isSessionRunning) return@Runnable
+        Log.w(VOICE_TAG, "Voice connection lost and no network returned within ${NETWORK_WAIT_TIMEOUT_MILLIS}ms")
+        isSessionRunning = false
+        failSession(IllegalStateException("No network for voice reconnect"), isAuthenticationFailure = false)
+    }
 
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
@@ -255,6 +330,106 @@ internal class VoiceSessionManager(
         hasDeliveredSessionInfo = false
         hasDeliveredInitialAudioMessage = false
         hasDeliveredInitialAudioPlayback = false
+        hasDeliveredMessageSendReady = false
+        reconnectAttempt = 0
+        isReconnecting = false
+        connectionOpenedAtMillis = null
+        networkWaitGeneration = null
+        connectionLostAtMillis = null
+
+        // Set up audio before the socket opens so the audio route change does not overlap the start
+        // of the connection. Captured audio is dropped until `opened`.
+        if (!setupAudio()) {
+            isSessionRunning = false
+            stopAudio()
+            state = State.ENDED
+            return
+        }
+        registerNetworkCallback()
+        openWebSocket(isReconnect = false)
+    }
+
+    /** Main thread. Reconnects as soon as the device rejoins a network after a drop. */
+    private fun registerNetworkCallback() {
+        val connectivityManager = AppContextHolder.applicationContext
+            .getSystemService(ConnectivityManager::class.java) ?: return
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                mainHandler.post {
+                    val generation = networkWaitGeneration ?: return@post
+                    if (generation != connectionGeneration.get() || !isSessionRunning) return@post
+                    networkWaitGeneration = null
+                    mainHandler.removeCallbacks(networkWaitDeadline)
+                    reconnectAttempt += 1
+                    Log.i(VOICE_TAG, "Network available, reconnecting voice (attempt $reconnectAttempt)")
+                    reconnect()
+                }
+            }
+        }
+        try {
+            connectivityManager.registerDefaultNetworkCallback(callback)
+            networkCallback = callback
+        } catch (e: RuntimeException) {
+            // A host can strip ACCESS_NETWORK_STATE from the merged manifest. Reconnects then use
+            // the backoff schedule without waiting for the network.
+            Log.w(VOICE_TAG, "Could not watch the network for voice reconnects", e)
+        }
+    }
+
+    private fun isNetworkAvailable(): Boolean {
+        if (networkCallback == null) return true
+        val connectivityManager = AppContextHolder.applicationContext
+            .getSystemService(ConnectivityManager::class.java) ?: return true
+        return connectivityManager.activeNetwork != null
+    }
+
+    /** Main thread. Stops every timer and callback that could reopen the connection. */
+    private fun stopConnectionRecovery() {
+        mainHandler.removeCallbacks(reconnectRunnable)
+        mainHandler.removeCallbacks(networkWaitDeadline)
+        networkWaitGeneration = null
+        cancelOpenTimeout()
+        networkCallback?.let { callback ->
+            networkCallback = null
+            try {
+                AppContextHolder.applicationContext
+                    .getSystemService(ConnectivityManager::class.java)
+                    ?.unregisterNetworkCallback(callback)
+            } catch (e: RuntimeException) {
+                Log.w(VOICE_TAG, "Could not stop watching the network", e)
+            }
+        }
+    }
+
+    /** Opens a new socket for the running session without resetting per-session state. */
+    private fun reconnect() {
+        if (!isSessionRunning) {
+            return
+        }
+        openWebSocket(isReconnect = true)
+    }
+
+    private fun openWebSocket(isReconnect: Boolean) {
+        val generation = synchronized(connectionLock) {
+            isConnectionOpen = false
+            connectionGeneration.incrementAndGet()
+        }
+        cancelOpenTimeout()
+        // The socket has no read timeout and pings start only once it is open, so a connection that
+        // never receives `opened` would otherwise wait forever. A reconnect timeout uses up an
+        // attempt. A first-connection timeout is followed by the full reconnect schedule.
+        val openTimeoutMillis = if (isReconnect) RECONNECT_OPEN_TIMEOUT_MILLIS else FIRST_CONNECTION_OPEN_TIMEOUT_MILLIS
+        val timeout = Runnable {
+            openTimeout = null
+            handleConnectionLost(
+                generation,
+                IllegalStateException("Voice connection did not open within ${openTimeoutMillis}ms"),
+                handshakeStatusCode = null,
+                onlyIfUnopened = true,
+            )
+        }
+        openTimeout = timeout
+        mainHandler.postDelayed(timeout, openTimeoutMillis)
 
         var svpPath = "${config.apiHost.voiceBaseURL}/chat/voice/svp/${config.token}"
         if (!config.target.isNullOrEmpty()) {
@@ -272,21 +447,53 @@ internal class VoiceSessionManager(
 
         webSocket = okHttpClient.newWebSocket(requestBuilder.build(), object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                sendOpen()
+                val subMsg = synchronized(connectionLock) {
+                    if (generation != connectionGeneration.get()) {
+                        return
+                    }
+                    buildOpenSubMessage(isReconnect).also {
+                        isResumedConnection = it.has("resumeToken")
+                        isAwaitingReconnectTraffic = isReconnect
+                    }
+                }
+                webSocket.send(
+                    JSONObject()
+                        .put("type", "open")
+                        .put("msgNum", nextMsgNum())
+                        .put("subMsg", subMsg)
+                        .toString()
+                )
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                handleMessage(text)
+                handleMessage(text, generation)
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
                 webSocket.close(code, reason)
             }
 
+            // A close frame means the server ended the session on purpose, so it is not retried.
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                val wasRunning = isSessionRunning
-                isSessionRunning = false
+                // Checked on the main thread so an attempt that already timed out there is stale.
                 mainHandler.post {
+                    if (generation != connectionGeneration.get()) {
+                        return@post
+                    }
+                    val wasOpen = isConnectionOpen
+                    isConnectionOpen = false
+                    val wasRunning = isSessionRunning
+                    isSessionRunning = false
+                    // The server closes a connection whose `open` it cannot process, such as a
+                    // resume of a conversation it no longer has. Retrying would fail the same way.
+                    if (wasRunning && !wasOpen) {
+                        failSession(
+                            IllegalStateException("Voice connection closed before opened (code=$code, reason=$reason)"),
+                            isAuthenticationFailure = false,
+                        )
+                        return@post
+                    }
+                    stopConnectionRecovery()
                     // If the server closes before session bootstrap completes (e.g. wrong target),
                     // surface an explicit error instead of silently ending.
                     if (wasRunning && !hasDeliveredSessionInfo) {
@@ -301,16 +508,101 @@ internal class VoiceSessionManager(
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                if (!isSessionRunning) {
-                    return
-                }
-                isSessionRunning = false
-                mainHandler.post {
-                    delegate.onError(t)
-                    state = State.ENDED
-                }
+                val statusCode = response?.code
+                mainHandler.post { handleConnectionLost(generation, t, statusCode) }
             }
         })
+    }
+
+    /** Main thread. [onlyIfUnopened] skips a socket that has received `opened`. */
+    private fun handleConnectionLost(
+        generation: Int,
+        error: Throwable,
+        handshakeStatusCode: Int?,
+        onlyIfUnopened: Boolean = false,
+    ) {
+        val newGeneration = synchronized(connectionLock) {
+            if (generation != connectionGeneration.get() || !isSessionRunning || (onlyIfUnopened && isConnectionOpen)) {
+                return
+            }
+            isConnectionOpen = false
+            // Cancelling a socket that is still connecting reports another failure for it; ignore it.
+            connectionGeneration.incrementAndGet()
+        }
+        webSocket?.cancel()
+        webSocket = null
+        cancelOpenTimeout()
+        val now = SystemClock.elapsedRealtime()
+        val lostAt = connectionLostAtMillis ?: now.also { connectionLostAtMillis = it }
+
+        val openedAt = connectionOpenedAtMillis
+        val wasUnopenedReconnectAttempt = isReconnecting && openedAt == null
+        if (openedAt != null && now - openedAt >= STABLE_CONNECTION_MILLIS) {
+            reconnectAttempt = 0
+        }
+        connectionOpenedAtMillis = null
+
+        val isHandshakeRejected = handshakeStatusCode != null && handshakeStatusCode in 400..499
+        if (!isHandshakeRejected && !isNetworkAvailable()) {
+            // An attempt without a network says nothing about the server, so it is not counted.
+            if (wasUnopenedReconnectAttempt) {
+                reconnectAttempt = maxOf(0, reconnectAttempt - 1)
+            }
+            val remainingMillis = lostAt + NETWORK_WAIT_TIMEOUT_MILLIS - now
+            if (remainingMillis <= 0) {
+                Log.w(VOICE_TAG, "Voice connection lost with no network past the network wait", error)
+                isSessionRunning = false
+                failSession(error, isAuthenticationFailure = false)
+                return
+            }
+            Log.w(VOICE_TAG, "Voice connection lost with no network, waiting up to ${remainingMillis}ms", error)
+            networkWaitGeneration = newGeneration
+            mainHandler.removeCallbacks(networkWaitDeadline)
+            mainHandler.postDelayed(networkWaitDeadline, remainingMillis)
+            mainHandler.removeCallbacks(reconnectRunnable)
+            beginReconnecting()
+            return
+        }
+        if (isHandshakeRejected || reconnectAttempt >= RECONNECT_BASE_DELAYS_MILLIS.size) {
+            Log.w(VOICE_TAG, "Voice connection lost, not reconnecting (attempts=$reconnectAttempt, status=$handshakeStatusCode)")
+            isSessionRunning = false
+            failSession(error, isAuthenticationFailure = handshakeStatusCode == 401 || handshakeStatusCode == 403)
+            return
+        }
+
+        val baseDelayMillis = RECONNECT_BASE_DELAYS_MILLIS[reconnectAttempt]
+        val delayMillis = (baseDelayMillis * Random.nextDouble(1 - RECONNECT_JITTER, 1 + RECONNECT_JITTER)).toLong()
+        reconnectAttempt += 1
+        Log.w(VOICE_TAG, "Voice connection lost, reconnecting in ${delayMillis}ms (attempt $reconnectAttempt)", error)
+        mainHandler.removeCallbacks(reconnectRunnable)
+        mainHandler.postDelayed(reconnectRunnable, delayMillis)
+        beginReconnecting()
+    }
+
+    /** Main thread. */
+    private fun beginReconnecting() {
+        state = State.CONNECTING
+        // Playback marks from the old connection mean nothing to the new one.
+        clearAudioQueue()
+        if (!isReconnecting) {
+            isReconnecting = true
+            delegate.onStartReconnecting()
+        }
+    }
+
+    /** Main thread. */
+    private fun cancelOpenTimeout() {
+        openTimeout?.let { mainHandler.removeCallbacks(it) }
+        openTimeout = null
+    }
+
+    /** Main thread. Ends a session that can no longer continue and reports why. */
+    private fun failSession(error: Throwable, isAuthenticationFailure: Boolean) {
+        stopConnectionRecovery()
+        isReconnecting = false
+        stopAudio()
+        delegate.onConnectionError(error, isAuthenticationFailure)
+        state = State.ENDED
     }
 
     fun disconnect(
@@ -322,6 +614,8 @@ internal class VoiceSessionManager(
 
     private fun disconnect(sendCloseMessage: Boolean = true, rawReason: String) {
         isSessionRunning = false
+        mainHandler.removeCallbacks(reconnectRunnable)
+        mainHandler.post { stopConnectionRecovery() }
         hasDeliveredSessionInfo = false
         hasDeliveredInitialAudioMessage = false
         hasDeliveredInitialAudioPlayback = false
@@ -337,6 +631,10 @@ internal class VoiceSessionManager(
         stopAudio()
         if (sendCloseMessage) {
             sendClose(rawReason)
+        }
+        synchronized(connectionLock) {
+            isConnectionOpen = false
+            connectionGeneration.incrementAndGet()
         }
         webSocket?.close(1000, rawReason)
         webSocket = null
@@ -366,10 +664,10 @@ internal class VoiceSessionManager(
         )
     }
 
-    override fun sendAttachmentsClient(attachments: List<Map<String, Any?>>) {
+    override fun sendAttachmentsClient(attachments: List<Map<String, Any?>>): Boolean {
         val arr = JSONArray()
         attachments.forEach { arr.put(JSONObject(it)) }
-        sendJSON(
+        return sendJSON(
             JSONObject()
                 .put("type", "attachments_client")
                 .put("msgNum", nextMsgNum())
@@ -401,16 +699,7 @@ internal class VoiceSessionManager(
         )
     }
 
-    private fun sendOpen() {
-        sendJSON(
-            JSONObject()
-                .put("type", "open")
-                .put("msgNum", nextMsgNum())
-                .put("subMsg", buildOpenSubMessage())
-        )
-    }
-
-    internal fun buildOpenSubMessage(): JSONObject {
+    internal fun buildOpenSubMessage(isReconnect: Boolean = false): JSONObject {
         val subMsg = JSONObject()
             .put("compatibilityDate", compatibilityDate)
             .put("conversationId", conversationId)
@@ -423,10 +712,15 @@ internal class VoiceSessionManager(
         if (resumeConversation) {
             subMsg.put("resumeConversation", true)
         }
-        resumeReason?.let { reason ->
-            subMsg.put("resumeReason", reason.rawValue)
+        // After `session_info` a reconnect is a plain network resume; resending the reason would
+        // make the server repeat its handling (for example `continue-in-voice`).
+        if (!hasDeliveredSessionInfo) {
+            resumeReason?.let { reason ->
+                subMsg.put("resumeReason", reason.rawValue)
+            }
         }
-        resumeToken?.let { token ->
+        val token = resumeToken
+        if (token != null && (!isReconnect || shouldResumeOnReconnect(hasDeliveredSessionInfo, startedAsResume))) {
             subMsg.put("resumeToken", token)
         }
         if (agentParameters.isNotEmpty()) {
@@ -439,6 +733,10 @@ internal class VoiceSessionManager(
     }
 
     private fun sendAudioClient(audioData: ByteArray) {
+        // Capture starts before the socket opens; skip encoding and logging until it has.
+        if (!isConnectionOpen) {
+            return
+        }
         val base64 = Base64.encodeToString(audioData, Base64.NO_WRAP)
         sendJSON(
             JSONObject()
@@ -467,7 +765,12 @@ internal class VoiceSessionManager(
     }
 
     private fun sendJSON(payload: JSONObject): Boolean {
-        return webSocket?.send(payload.toString()) == true
+        val socket = webSocket ?: return false
+        if (!isConnectionOpen) {
+            Log.d(VOICE_TAG, "SVP send: ${payload.optString("type")} dropped before opened")
+            return false
+        }
+        return socket.send(payload.toString())
     }
 
     private fun dispatchInputAudioLevel(level: Float) {
@@ -514,7 +817,8 @@ internal class VoiceSessionManager(
         return msgNum.incrementAndGet()
     }
 
-    private fun handleMessage(text: String) {
+    /** [generation] is the connection generation of the socket that received [text]. */
+    internal fun handleMessage(text: String, generation: Int = connectionGeneration.get()) {
         val json = try {
             JSONObject(text)
         } catch (e: JSONException) {
@@ -523,6 +827,23 @@ internal class VoiceSessionManager(
         }
         val type = json.optString("type")
         val subMsg = json.optJSONObject("subMsg") ?: JSONObject()
+        // Socket replacement holds the same lock, so a message from a replaced socket has no effect.
+        // Ending the session waits for the lock to be released, because it joins the audio threads.
+        // Stopping the session under the lock keeps a reconnect from starting in between.
+        val endSession = synchronized(connectionLock) {
+            if (generation != connectionGeneration.get()) return
+            applyMessage(type, subMsg, generation)?.also { isSessionRunning = false }
+        }
+        endSession?.invoke()
+    }
+
+    /** Called with [connectionLock] held. Returns the work that ends the session, if any. */
+    private fun applyMessage(type: String, subMsg: JSONObject, generation: Int): (() -> Unit)? {
+        val isRejectedReconnect = isAwaitingReconnectTraffic && type == "end_conversation" &&
+            subMsg.optString("reason") == SERVER_END_REASON_ERROR
+        if (type != "opened") {
+            isAwaitingReconnectTraffic = false
+        }
         when (type) {
             "opened" -> {
                 val token = if (subMsg.has("resumeToken") && !subMsg.isNull("resumeToken")) {
@@ -530,12 +851,25 @@ internal class VoiceSessionManager(
                 } else {
                     null
                 }
-                if (token != null) {
+                if (token != null && !isResumedConnection) {
                     resumeToken = token
                     mainHandler.post { delegate.onReceiveResumeToken(token) }
                 }
-                if (setupAudio()) {
-                    mainHandler.post { state = State.LISTENING }
+                isConnectionOpen = true
+                mainHandler.post {
+                    if (!isSessionRunning || generation != connectionGeneration.get()) return@post
+                    cancelOpenTimeout()
+                    connectionLostAtMillis = null
+                    connectionOpenedAtMillis = SystemClock.elapsedRealtime()
+                    state = State.LISTENING
+                    if (isReconnecting) {
+                        isReconnecting = false
+                        delegate.onReconnect()
+                    }
+                    if (!hasDeliveredMessageSendReady) {
+                        hasDeliveredMessageSendReady = true
+                        delegate.onMessageSendReady()
+                    }
                 }
             }
             "session_info" -> {
@@ -575,12 +909,12 @@ internal class VoiceSessionManager(
             }
             "conversation_event_server" -> {
                 if (!enableConversationEvents) {
-                    return
+                    return null
                 }
                 val event = subMsg.toAgentVoiceConversationEvent()
                 if (event == null) {
                     Log.w(VOICE_TAG, "SVP conversation_event_server received but could not parse subMsg")
-                    return
+                    return null
                 }
                 mainHandler.post { delegate.onReceiveConversationEvent(event) }
             }
@@ -589,22 +923,36 @@ internal class VoiceSessionManager(
                 // A server-initiated voice->chat handoff ends the call with the continue_in_chat
                 // custom reason. Surface it distinctly so the host can continue the same
                 // conversation in chat; any other end is a normal session end.
-                if (subMsg.optString("customReason") == AgentVoiceCloseReason.CONTINUE_IN_CHAT.rawValue) {
-                    sendClose(AgentVoiceCloseReason.CONTINUE_IN_CHAT.rawValue)
-                    disconnect(sendCloseMessage = false, closeReason = AgentVoiceCloseReason.CONTINUE_IN_CHAT)
-                    mainHandler.post { delegate.onContinueInChat() }
+                return if (isRejectedReconnect) {
+                    {
+                        Log.w(VOICE_TAG, "Voice reconnect rejected by the server")
+                        delegate.onConnectionError(
+                            IllegalStateException("Voice reconnect rejected by the server"),
+                            isAuthenticationFailure = false,
+                        )
+                        disconnect(closeReason = AgentVoiceCloseReason.ERROR)
+                    }
+                } else if (subMsg.optString("customReason") == AgentVoiceCloseReason.CONTINUE_IN_CHAT.rawValue) {
+                    {
+                        sendClose(AgentVoiceCloseReason.CONTINUE_IN_CHAT.rawValue)
+                        disconnect(sendCloseMessage = false, closeReason = AgentVoiceCloseReason.CONTINUE_IN_CHAT)
+                        mainHandler.post { delegate.onContinueInChat() }
+                    }
                 } else {
-                    sendClose(AgentVoiceCloseReason.NORMAL.rawValue)
-                    disconnect(sendCloseMessage = false)
-                    mainHandler.post { delegate.onEnd() }
+                    {
+                        sendClose(AgentVoiceCloseReason.NORMAL.rawValue)
+                        disconnect(sendCloseMessage = false)
+                        mainHandler.post { delegate.onEnd() }
+                    }
                 }
             }
-            "transfer" -> {
+            "transfer" -> return {
                 sendClose(AgentVoiceCloseReason.TRANSFERRED.rawValue)
                 disconnect(sendCloseMessage = false, closeReason = AgentVoiceCloseReason.TRANSFERRED)
                 mainHandler.post { delegate.onEnd() }
             }
         }
+        return null
     }
 
     private fun setupAudio(): Boolean {
@@ -615,45 +963,47 @@ internal class VoiceSessionManager(
             stopAudio()
         }
 
-        val minRecordSize = AudioRecord.getMinBufferSize(
-            sampleRate,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT
-        ).coerceAtLeast(9600)
-
-        val minTrackSize = AudioTrack.getMinBufferSize(
-            sampleRate,
-            AudioFormat.CHANNEL_OUT_MONO,
-            AudioFormat.ENCODING_PCM_16BIT
-        ).coerceAtLeast(9600)
-
-        audioRecord = AudioRecord(
-            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-            sampleRate,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT,
-            minRecordSize
-        )
-
-        audioTrack = AudioTrack.Builder()
-            .setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .build()
-            )
-            .setAudioFormat(
-                AudioFormat.Builder()
-                    .setSampleRate(sampleRate)
-                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                    .build()
-            )
-            .setTransferMode(AudioTrack.MODE_STREAM)
-            .setBufferSizeInBytes(minTrackSize)
-            .build()
-
+        // Allocation throws on some devices (for example AudioTrack.Builder.build()), and this
+        // runs from the host's main thread, so every step reports a voice error instead.
         try {
+            val minRecordSize = AudioRecord.getMinBufferSize(
+                sampleRate,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT
+            ).coerceAtLeast(9600)
+
+            val minTrackSize = AudioTrack.getMinBufferSize(
+                sampleRate,
+                AudioFormat.CHANNEL_OUT_MONO,
+                AudioFormat.ENCODING_PCM_16BIT
+            ).coerceAtLeast(9600)
+
+            audioRecord = AudioRecord(
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                sampleRate,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                minRecordSize
+            )
+
+            audioTrack = AudioTrack.Builder()
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setSampleRate(sampleRate)
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                        .build()
+                )
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .setBufferSizeInBytes(minTrackSize)
+                .build()
+
             audioManager = AppContextHolder.applicationContext
                 .getSystemService(Context.AUDIO_SERVICE) as? AudioManager
             audioManager?.apply {
@@ -954,6 +1304,44 @@ internal class VoiceSessionManager(
         echoGateFloorRms = echoGateInitialFloorRms
     }
 }
+
+/** SVP `end_conversation` reason for a server-side failure. */
+private const val SERVER_END_REASON_ERROR = "error"
+
+/**
+ * A connection must stay open this long after `opened` for its loss to reset the attempt count, so
+ * a socket that drops right after each `opened` still runs out of attempts.
+ */
+private const val STABLE_CONNECTION_MILLIS = 10_000L
+
+/**
+ * Delay before each reconnect attempt after a lost connection; its size is the number of attempts.
+ * The budget resets when a connection that stayed open for [STABLE_CONNECTION_MILLIS] is lost.
+ */
+private val RECONNECT_BASE_DELAYS_MILLIS = longArrayOf(1_000, 2_000, 4_000)
+
+/** A reconnect attempt that has not received `opened` within this long fails and counts as used. */
+private const val RECONNECT_OPEN_TIMEOUT_MILLIS = 5_000L
+
+/** A first connection that has not received `opened` within this long fails, and the full reconnect schedule follows. */
+private const val FIRST_CONNECTION_OPEN_TIMEOUT_MILLIS = 10_000L
+
+/**
+ * After the connection is first lost, the session waits at most this long for the device to rejoin a
+ * network. Attempts made without a network do not count toward [RECONNECT_BASE_DELAYS_MILLIS].
+ */
+private const val NETWORK_WAIT_TIMEOUT_MILLIS = 20_000L
+
+/** Each reconnect delay varies by up to this fraction either way. */
+private const val RECONNECT_JITTER = 0.2
+
+/**
+ * Whether a reconnect resumes the conversation with the resume token or opens it fresh. Before
+ * `session_info` the server has no conversation to resume, unless the session itself started as a
+ * resume; resuming then fails with "conversation not found for resume".
+ */
+internal fun shouldResumeOnReconnect(hasDeliveredSessionInfo: Boolean, startedAsResume: Boolean): Boolean =
+    hasDeliveredSessionInfo || startedAsResume
 
 internal fun applySvpAuthentication(
     requestBuilder: Request.Builder,

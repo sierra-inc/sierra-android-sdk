@@ -37,10 +37,12 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.android.controller.ActivityController
+import org.robolectric.annotation.Config
 import org.robolectric.annotation.ConscryptMode
 
 @ConscryptMode(ConscryptMode.Mode.OFF)
 @RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34])
 class AgentVoiceFragmentConfigurationChangeTest {
     private val dnsGate = CountDownLatch(1)
     private var activeController: ActivityController<FragmentActivity>? = null
@@ -219,6 +221,10 @@ class AgentVoiceFragmentConfigurationChangeTest {
         VoiceSessionManager::class.java.getDeclaredField("webSocket").apply {
             isAccessible = true
             set(session, webSocket)
+        }
+        VoiceSessionManager::class.java.getDeclaredField("isConnectionOpen").apply {
+            isAccessible = true
+            set(session, true)
         }
         val store = ViewModelStore()
         val viewModel = ViewModelProvider(

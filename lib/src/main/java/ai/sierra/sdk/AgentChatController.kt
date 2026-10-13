@@ -449,6 +449,13 @@ data class AgentChatControllerOptions(
      * precedence if useConfiguredStyle is true.
      */
     var uploadButtonIconSVG: String? = null,
+
+    /**
+     * Inline SVG markup for the icon shown next to live agent display names. Replaces the default
+     * headset icon when provided. When both the SDK and server provide a value, the
+     * server-configured value takes precedence if useConfiguredStyle is true.
+     */
+    var liveAgentIconSVG: String? = null,
 ) : Parcelable {
     companion object {
         // A baseline instance with the hardcoded English defaults, used to detect which
