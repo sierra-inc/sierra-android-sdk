@@ -4,6 +4,7 @@
 package ai.sierra.sdk
 
 import android.os.Parcelable
+import androidx.annotation.ColorInt
 import androidx.annotation.RestrictTo
 import kotlinx.parcelize.Parcelize
 import org.json.JSONObject
@@ -34,6 +35,29 @@ data class ChatComposerInsets(
         end?.let { json["end"] = it }
         return json
     }
+}
+
+/** A single outer shadow around the composer. Dimensions are in density-independent pixels and default to zero. */
+@Parcelize
+data class ChatComposerShadow(
+    /** Shadow color, including opacity in its alpha channel. */
+    @ColorInt val color: Int,
+    /** Positive values move the shadow right, including in right-to-left layouts. */
+    val offsetX: Int? = null,
+    /** Positive values move the shadow down. */
+    val offsetY: Int? = null,
+    /** Negative values are clamped to zero by the renderer. */
+    val blurRadius: Int? = null,
+    /** Negative values shrink the shadow. */
+    val spreadRadius: Int? = null,
+) : Parcelable {
+    internal fun toJSON(): Map<String, Any> = listOf(
+        "color" to color.toHexColor(),
+        "offsetX" to offsetX,
+        "offsetY" to offsetY,
+        "blurRadius" to blurRadius,
+        "spreadRadius" to spreadRadius,
+    ).mapNotNull { (key, value) -> value?.let { key to it } }.toMap()
 }
 
 /**
@@ -78,6 +102,22 @@ data class ChatComposerStyle(
      * effective action button size. Does not resize SVGs that replace the complete send button.
      */
     val actionIconSize: Int? = null,
+
+    /**
+     * Show the upload/send separator. Defaults to true. When false, the default gap is 24
+     * density-independent pixels. Use actionButtonSpacing to override the gap with or without it.
+     */
+    val showActionDivider: Boolean? = null,
+
+    /** Outer shadow around the composer. Use outerInsets to leave room for it. */
+    val shadow: ChatComposerShadow? = null,
+
+    /**
+     * Horizontal gap between the upload and send button edges, in density-independent pixels,
+     * with the optional divider centered in the gap. Omit to keep default spacing.
+     * Negative values clamp to zero.
+     */
+    val actionButtonSpacing: Int? = null,
 ) : Parcelable {
     @RestrictTo(RestrictTo.Scope.LIBRARY_GROUP)
     public fun toJSON(): Map<String, Any?> {
@@ -91,6 +131,9 @@ data class ChatComposerStyle(
         borderWidth?.let { json["borderWidth"] = it }
         actionButtonSize?.let { json["actionButtonSize"] = it }
         actionIconSize?.let { json["actionIconSize"] = it }
+        showActionDivider?.let { json["showActionDivider"] = it }
+        shadow?.let { json["shadow"] = it.toJSON() }
+        actionButtonSpacing?.let { json["actionButtonSpacing"] = it }
         return json
     }
 

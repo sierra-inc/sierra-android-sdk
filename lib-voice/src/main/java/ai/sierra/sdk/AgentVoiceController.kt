@@ -31,6 +31,8 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.Parcelable
+import android.text.method.LinkMovementMethod
+import android.text.style.ClickableSpan
 import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
@@ -185,7 +187,12 @@ public data class AgentVoiceStyle(
     /** Text size for the voice placeholder, in sp. Negative values are treated as zero. */
     val voicePlaceholderTextSizeSp: Float = 15f,
     /** Optional spacing override between the voice waveform and placeholder text, in dp. */
-    val voicePlaceholderSpacingDp: Int? = null
+    val voicePlaceholderSpacingDp: Int? = null,
+    /**
+     * Color for Markdown links (`[label](https://...)`) in the disclosure. Links are underlined.
+     * When null, links use the theme's link color.
+     */
+    @ColorInt val conversationDisclosureLinkColor: Int? = null
 ) : Parcelable {
     @IgnoredOnParcel
     @Suppress("DEPRECATION")
@@ -1122,7 +1129,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         }
 
         disclosureLabel = TextView(requireContext()).apply {
-            text = options.disclosureText.orEmpty()
+            setDisclosureText(this)
             setTextColor(options.voiceStyle.conversationDisclosureTextColor)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, options.voiceStyle.conversationDisclosureTextSizeSp)
             options.voiceStyle.conversationDisclosureFontResId?.let { fontResId ->
@@ -2085,6 +2092,15 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         setRendererFullscreen(false)
         rendererView?.visibility = View.GONE
         placeholderContainer.visibility = View.VISIBLE
+    }
+
+    private fun setDisclosureText(textView: TextView) {
+        val disclosure = disclosureText(options.disclosureText.orEmpty(), ::onLinkClick)
+        textView.text = disclosure
+        if (disclosure.getSpans(0, disclosure.length, ClickableSpan::class.java).isEmpty()) return
+        options.voiceStyle.conversationDisclosureLinkColor?.let { textView.setLinkTextColor(it) }
+        textView.movementMethod = LinkMovementMethod.getInstance()
+        ViewCompat.enableAccessibleClickableSpanSupport(textView)
     }
 
     override fun onLinkClick(url: Uri) {
