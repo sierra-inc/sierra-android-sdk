@@ -25,8 +25,8 @@ import org.json.JSONException
 import org.json.JSONObject
 
 /**
- * Shapes posted by the mobile renderer web bundle use `attachments` (array). Older bundles may send
- * a single `attachment` with object `data` (mirrors iOS `MobileRendererView` normalization).
+ * Shapes posted by the voice renderer web bundle use `attachments` (array). Older bundles may send
+ * a single `attachment` with object `data` (mirrors iOS `VoiceRendererView` normalization).
  */
 private fun svpClientEventAttachments(json: JSONObject): List<Map<String, Any?>> {
     val arr = json.optJSONArray("attachments")
@@ -48,25 +48,25 @@ private fun svpClientEventAttachments(json: JSONObject): List<Map<String, Any?>>
     )
 }
 
-internal interface MobileRendererDelegate {
+internal interface VoiceRendererDelegate {
     fun onSVPClientEvent(text: String, attachments: List<Map<String, Any?>>)
-    fun onMobileRendererError(error: Throwable)
+    fun onVoiceRendererError(error: Throwable)
     fun onLinkClick(url: Uri)
-    fun onDisplayModeChanged(displayMode: MobileRendererDisplayMode)
+    fun onDisplayModeChanged(displayMode: VoiceRendererDisplayMode)
 }
 
-internal enum class MobileRendererDisplayMode {
+internal enum class VoiceRendererDisplayMode {
     INLINE,
     FULLSCREEN
 }
 
-internal class MobileRendererMessageBoundary(
+internal class VoiceRendererMessageBoundary(
     private val allowedOrigin: String,
     private val onOpen: () -> Unit,
     private val onSVPClientEvent: (String, List<Map<String, Any?>>) -> Unit,
     private val onError: (Throwable) -> Unit,
     private val onLinkClick: (String) -> Unit,
-    private val onDisplayModeChanged: (MobileRendererDisplayMode) -> Unit
+    private val onDisplayModeChanged: (VoiceRendererDisplayMode) -> Unit
 ) {
     fun onPostMessage(data: String, sourceOrigin: String, isMainFrame: Boolean) {
         if (!isMainFrame || sourceOrigin != allowedOrigin) {
@@ -99,8 +99,8 @@ internal class MobileRendererMessageBoundary(
             }
             "onDisplayModeChanged" -> {
                 val displayMode = when (message.optString("displayMode")) {
-                    "inline" -> MobileRendererDisplayMode.INLINE
-                    "fullscreen" -> MobileRendererDisplayMode.FULLSCREEN
+                    "inline" -> VoiceRendererDisplayMode.INLINE
+                    "fullscreen" -> VoiceRendererDisplayMode.FULLSCREEN
                     else -> return
                 }
                 onDisplayModeChanged(displayMode)
@@ -109,21 +109,21 @@ internal class MobileRendererMessageBoundary(
     }
 }
 
-internal class MobileRendererView(
+internal class VoiceRendererView(
     context: Context,
     private val agentConfig: AgentConfig,
     private val options: AgentVoiceControllerOptions,
     private val conversationEventListener: ConversationEventListener?,
-    private val delegate: MobileRendererDelegate
+    private val delegate: VoiceRendererDelegate
 ) : FrameLayout(context) {
     private val webView: WebView
     private val mainHandler = Handler(Looper.getMainLooper())
     private val rendererOrigin = Uri.parse(agentConfig.apiHost.embedBaseURL)
-    private val messageBoundary = MobileRendererMessageBoundary(
+    private val messageBoundary = VoiceRendererMessageBoundary(
         allowedOrigin = rendererOrigin.toString(),
         onOpen = ::handleRendererOpen,
         onSVPClientEvent = delegate::onSVPClientEvent,
-        onError = delegate::onMobileRendererError,
+        onError = delegate::onVoiceRendererError,
         onLinkClick = { delegate.onLinkClick(Uri.parse(it)) },
         onDisplayModeChanged = delegate::onDisplayModeChanged
     )
@@ -168,9 +168,9 @@ internal class MobileRendererView(
         webView.settings.allowUniversalAccessFromFileURLs = false
         webView.settings.allowContentAccess = false
         webView.settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-        webView.webViewClient = MobileRendererWebViewClient(agentConfig, conversationEventListener, delegate)
+        webView.webViewClient = VoiceRendererWebViewClient(agentConfig, conversationEventListener, delegate)
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
-            delegate.onMobileRendererError(
+            delegate.onVoiceRendererError(
                 UnsupportedOperationException("WebView does not support secure renderer messages")
             )
             return false
@@ -207,6 +207,9 @@ internal class MobileRendererView(
         }
         if (options.enableTextInput && options.enableLiveTranscription) {
             builder.appendQueryParameter("enableLiveTranscription", "true")
+        }
+        if (options.locale.isNotEmpty()) {
+            builder.appendQueryParameter("locale", options.locale)
         }
         builder.appendQueryParameter("supportsLinkClick", "true")
         builder.appendQueryParameter("supportsFullscreen", "true")
@@ -287,7 +290,7 @@ internal class MobileRendererView(
                     scheduleConversationEventFlush(delayMs = CONVERSATION_EVENT_RETRY_DELAY_MS)
                     return@evaluatePushConversationEvents
                 }
-                delegate.onMobileRendererError(
+                delegate.onVoiceRendererError(
                     IllegalStateException("pushConversationEvents is not available")
                 )
                 return@evaluatePushConversationEvents
@@ -374,10 +377,10 @@ internal class MobileRendererView(
     }
 }
 
-private class MobileRendererWebViewClient(
+private class VoiceRendererWebViewClient(
     private val agentConfig: AgentConfig,
     private val conversationEventListener: ConversationEventListener?,
-    private val delegate: MobileRendererDelegate
+    private val delegate: VoiceRendererDelegate
 ) : WebViewClient() {
     @SuppressLint("WebViewClientOnReceivedSslError")
     override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: SslError?) {
@@ -394,7 +397,7 @@ private class MobileRendererWebViewClient(
         error: WebResourceError
     ) {
         if (request.isForMainFrame) {
-            delegate.onMobileRendererError(IllegalStateException(error.description.toString()))
+            delegate.onVoiceRendererError(IllegalStateException(error.description.toString()))
         }
     }
 }

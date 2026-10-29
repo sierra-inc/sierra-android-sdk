@@ -38,6 +38,18 @@ public class AgentVoiceChatCoordinator(
          * navigation bar button is shown.
          */
         val autoShowChatOnEnd: Boolean = true,
+        /**
+         * When true, chat opened for a conversation that started in voice shows a title-bar
+         * button that resumes it in voice. On tap, the coordinator calls [prepareVoiceReconnect]
+         * and fires [Delegate.coordinatorDidRequestVoiceReconnect]; the host should then present
+         * the voice controller created via [makeVoiceController]. The button shows only while chat
+         * displays that conversation and the server has issued a voice resume token. It is hidden
+         * after the conversation ends or moves to a live agent, and when [chatOptions] hides the
+         * title bar.
+         */
+        val canReconnectToVoice: Boolean = false,
+        /** Label for the reconnect-to-voice button. Defaults to the chat's localized label. */
+        val reconnectVoiceLabel: String? = null,
     )
 
     public interface Delegate {
@@ -46,6 +58,13 @@ public class AgentVoiceChatCoordinator(
          * chat controller created via [makeChatController] so the transcript is preserved.
          */
         public fun coordinatorDidRequestShowingChat(coord: AgentVoiceChatCoordinator)
+
+        /**
+         * Called when the user taps the reconnect-to-voice button in chat (see
+         * [Options.canReconnectToVoice]). The host should present the voice controller created via
+         * [makeVoiceController], which resumes the same voice conversation.
+         */
+        public fun coordinatorDidRequestVoiceReconnect(coord: AgentVoiceChatCoordinator) {}
 
         /**
          * Called when the voice session ends naturally. The host should typically dismiss or pop
@@ -193,6 +212,25 @@ public class AgentVoiceChatCoordinator(
         chatOptions.conversationEventListener = options.chatOptions.conversationEventListener
             ?: agentEventListener?.let { ChatEventListenerAdapter(it) }
         chatOptions.onConversationEndedInternal = { resetConversation() }
+        val reconnectConversationID = conversationID
+        val reconnectVoiceConversationID = voiceConversationID
+        if (options.canReconnectToVoice && reconnectConversationID != null &&
+            reconnectVoiceConversationID != null && voiceResumeToken != null
+        ) {
+            chatOptions.reconnectVoiceInternal = ReconnectVoiceAction(
+                conversationID = reconnectConversationID,
+                label = options.reconnectVoiceLabel,
+            ) {
+                // Ignore a tap from a controller made for an earlier session, or after ending the
+                // chat reset the voice credentials, so it can't resume or start the wrong call.
+                if (conversationID == reconnectConversationID &&
+                    voiceConversationID == reconnectVoiceConversationID && voiceResumeToken != null
+                ) {
+                    prepareVoiceReconnect()
+                    delegate?.coordinatorDidRequestVoiceReconnect(this)
+                }
+            }
+        }
         return AgentChatController(agent, chatOptions)
     }
 

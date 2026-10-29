@@ -166,9 +166,9 @@ public data class AgentVoiceStyle(
     @FontRes val conversationDisclosureFontResId: Int? = null,
     /** Font size for the disclosure shown below the controls, in sp. */
     val conversationDisclosureTextSizeSp: Float = 12f,
-    /** Transcript bubble colors in the mobile renderer. */
+    /** Transcript bubble colors in the voice renderer. */
     val messageColors: ChatStyleColors = ChatStyleColors(),
-    /** Transcript bubble typography in the mobile renderer. */
+    /** Transcript bubble typography in the voice renderer. */
     val messageTypography: ChatStyleTypography? = null,
     /** Tint color for the native text composer send button. Defaults to the user message color. */
     @ColorInt val textComposerSendButtonTintColor: Int? = null,
@@ -276,7 +276,11 @@ public data class AgentVoiceControllerOptions(
     /** Error banner text for every other voice failure, such as a connection that could not be restored. */
     var voiceConnectionLostErrorMessage: String = "Voice connection lost. Please try again.",
     /** Banner text shown while the SDK reconnects after a dropped voice connection. */
-    var voiceReconnectingMessage: String = "Reconnecting…"
+    var voiceReconnectingMessage: String = "Reconnecting…",
+    /** Error banner text when the device refuses audio as voice starts, for example during another call. */
+    var voiceAudioUnavailableErrorMessage: String = "Voice audio isn't available right now.",
+    /** Error banner text when another app takes the audio and ends the voice session. */
+    var voiceAudioInterruptedErrorMessage: String = "Voice ended because another app is using audio."
 ) : Parcelable {
     @Deprecated("Use voiceAgentParameters instead.")
     @IgnoredOnParcel
@@ -498,7 +502,7 @@ private data class AgentVoiceFragmentArgs(
     val options: AgentVoiceControllerOptions
 ) : Parcelable
 
-internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRendererDelegate {
+internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, VoiceRendererDelegate {
     internal var controller: AgentVoiceController? = null
     public var voiceCallbacks: VoiceCallbacks? = null
 
@@ -561,7 +565,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
     private val placeholderWaveformBoxSizeDp = 80
     private val placeholderWaveformIconSizeDp = 40
 
-    private var rendererView: MobileRendererView? = null
+    private var rendererView: VoiceRendererView? = null
     private var isRendererFullscreen = false
     private val rendererFullscreenBackCallback = object : OnBackPressedCallback(false) {
         override fun handleOnBackPressed() {
@@ -1594,7 +1598,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         if (rendererView != null) {
             return
         }
-        val renderer = MobileRendererView(
+        val renderer = VoiceRendererView(
             context = requireContext(),
             agentConfig = agentConfig,
             options = options,
@@ -1831,25 +1835,12 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         deliverSwitchToChatIfNeeded(agentInitiated = false)
     }
 
-    private fun isExternalAudioInterruptionError(error: Throwable): Boolean {
-        var current: Throwable? = error
-        while (current != null) {
-            val className = current::class.java.name.lowercase()
-            val message = current.message?.lowercase().orEmpty()
-            val isAudioRelated = className.contains("audio") || message.contains("audio")
-            if (
-                className.contains("audiofocus") ||
-                message.contains("audio focus") ||
-                message.contains("audiofocus") ||
-                (isAudioRelated && message.contains("interruption")) ||
-                message.contains("cannot interrupt others")
-            ) {
-                return true
-            }
-            current = current.cause
+    private fun audioErrorMessage(error: Throwable): String? =
+        when ((error as? VoiceAudioException)?.reason) {
+            VoiceAudioException.Reason.UNAVAILABLE -> options.voiceAudioUnavailableErrorMessage
+            VoiceAudioException.Reason.INTERRUPTED -> options.voiceAudioInterruptedErrorMessage
+            null -> null
         }
-        return false
-    }
 
     override fun onReceiveCredentials(conversationID: String, encryptionKey: String?) {
         voiceCallbacks?.onSessionInfoReceived(conversationID, encryptionKey)
@@ -2014,12 +2005,8 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
     override fun onError(error: Throwable) {
         Log.e(VOICE_TAG, "Voice session error", error)
         mainHandler.post {
-            if (isExternalAudioInterruptionError(error)) {
-                endConversationForExit()
-                return@post
-            }
             // Only a 401/403 handshake points at credentials. See onConnectionError.
-            showErrorState(options.voiceConnectionLostErrorMessage)
+            showErrorState(audioErrorMessage(error) ?: options.voiceConnectionLostErrorMessage)
             voiceCallbacks?.onVoiceError(error)
         }
     }
@@ -2082,9 +2069,9 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         }
     }
 
-    override fun onMobileRendererError(error: Throwable) {
+    override fun onVoiceRendererError(error: Throwable) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
-            mainHandler.post { onMobileRendererError(error) }
+            mainHandler.post { onVoiceRendererError(error) }
             return
         }
         Log.e(VOICE_TAG, "Renderer error", error)
@@ -2109,7 +2096,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         }
         // Prefer VoiceCallbacks now that it inherits AgentEventListener, but keep the
         // conversationEventListener fallback for older direct-voice integrations that handled
-        // mobile-renderer links there. If both are different objects and the voice callback returns
+        // voice renderer links there. If both are different objects and the voice callback returns
         // false, both may observe the URL before the SDK falls back to Intent.ACTION_VIEW.
         val conversationEventListener = controller?.conversationEventListener
         if (conversationEventListener !== voiceCallbacks && conversationEventListener?.onLinkClick(url) == true) {
@@ -2126,10 +2113,10 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, MobileRend
         }
     }
 
-    override fun onDisplayModeChanged(displayMode: MobileRendererDisplayMode) {
+    override fun onDisplayModeChanged(displayMode: VoiceRendererDisplayMode) {
         setRendererFullscreen(
             controlState == ControlState.ACTIVE &&
-                displayMode == MobileRendererDisplayMode.FULLSCREEN
+                displayMode == VoiceRendererDisplayMode.FULLSCREEN
         )
     }
 

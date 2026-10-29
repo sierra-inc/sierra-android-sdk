@@ -456,6 +456,12 @@ data class AgentChatControllerOptions(
      * server-configured value takes precedence if useConfiguredStyle is true.
      */
     var liveAgentIconSVG: String? = null,
+
+    /**
+     * Label for the confirm button when ending a conversation. Null or empty keeps the existing
+     * label. Does not change the action that opens the confirmation.
+     */
+    var confirmEndConversationDialogConfirmButtonLabel: String? = null,
 ) : Parcelable {
     companion object {
         // A baseline instance with the hardcoded English defaults, used to detect which
@@ -474,6 +480,10 @@ data class AgentChatControllerOptions(
     @SierraInternalApi
     @IgnoredOnParcel
     public var onConversationEndedInternal: (() -> Unit)? = null
+
+    @SierraInternalApi
+    @IgnoredOnParcel
+    public var reconnectVoiceInternal: ReconnectVoiceAction? = null
 
     internal fun hasCustomGreetingMessage(): Boolean {
         return greetingMessage != DEFAULTS.greetingMessage
@@ -494,6 +504,17 @@ data class AgentChatControllerOptions(
         return hasCustomGreetingMessage()
     }
 }
+
+/** A chat title bar control, configured by SDK coordinators, that resumes the conversation in voice. */
+@SierraInternalApi
+public class ReconnectVoiceAction(
+    /** The chat conversation that continues the voice conversation. Shown only while it is open. */
+    public val conversationID: String,
+    /** Replaces the chat's localized label when set. */
+    public val label: String?,
+    /** Called on the main thread when the user taps the control. */
+    public val onReconnect: () -> Unit,
+)
 
 /**
  * Creates a chat controller backed by a WebView.
@@ -571,6 +592,7 @@ class AgentChatController(
             onConversationEndedInternal = ::notifyConversationEndedInternal,
             onDispose = ::disconnectFromView,
             viewId = viewId,
+            reconnectVoice = options.reconnectVoiceInternal,
         ).also {
             connectToView(it)
             it.initializeWhenAttached()
@@ -586,6 +608,9 @@ class AgentChatController(
             connectedView = null
         }
     }
+
+    internal val reconnectVoice: ReconnectVoiceAction?
+        get() = options.reconnectVoiceInternal
 
     internal fun notifyConversationEndedInternal() {
         options.onConversationEndedInternal?.invoke()
@@ -737,6 +762,7 @@ class AgentChatFragment : Fragment() {
                 { view -> controller.disconnectFromView(view) }
             },
             viewId = View.NO_ID,
+            reconnectVoice = controller?.reconnectVoice,
         ).also {
             chatView = it
             controller?.connectToView(it)

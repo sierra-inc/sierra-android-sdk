@@ -34,6 +34,8 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.ProgressBar
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.ColorInt
 import androidx.core.graphics.Insets
 import androidx.core.view.ViewCompat
@@ -42,9 +44,54 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.findViewTreeLifecycleOwner
+import androidx.webkit.WebMessageCompat
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
+import java.util.Locale
+
+internal fun createFileChooserIntent(
+    context: Context,
+    acceptTypes: Array<String>?,
+    allowMultiple: Boolean,
+): Intent {
+    val acceptedMimeTypes = acceptTypes
+        .orEmpty()
+        .flatMap { it.split(',') }
+        .map { it.trim().lowercase(Locale.ROOT) }
+        .filter { it.isNotEmpty() && !it.startsWith('.') }
+
+    if (acceptedMimeTypes.isEmpty()) {
+        return Intent(Intent.ACTION_GET_CONTENT).apply {
+            type = "*/*"
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, allowMultiple)
+        }
+    }
+
+    val isImageType = { type: String -> type.startsWith("image/") && type.length > "image/".length }
+    val photoPickerIntent = ActivityResultContracts.PickVisualMedia().createIntent(
+        context,
+        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+    )
+    if (acceptedMimeTypes.all(isImageType)) {
+        return photoPickerIntent
+    }
+
+    val getContentIntent = Intent(Intent.ACTION_GET_CONTENT).apply {
+        addCategory(Intent.CATEGORY_OPENABLE)
+        type = "*/*"
+        putExtra(Intent.EXTRA_MIME_TYPES, acceptedMimeTypes.toTypedArray())
+        putExtra(Intent.EXTRA_ALLOW_MULTIPLE, allowMultiple)
+    }
+    if (acceptedMimeTypes.none { isImageType(it) || it == "*/*" }) {
+        return getContentIntent
+    }
+    return Intent.createChooser(getContentIntent, null).apply {
+        putExtra(Intent.EXTRA_INITIAL_INTENTS, arrayOf(photoPickerIntent))
+    }
+}
 
 /** The native loading color. The web embed owns server-configured and translucent backgrounds. */
 @ColorInt
@@ -71,8 +118,11 @@ class AgentChatView internal constructor(
     private val onConversationEndedInternal: (() -> Unit)?,
     private val onDispose: ((AgentChatView) -> Unit)?,
     viewId: Int,
+    private val reconnectVoice: ReconnectVoiceAction? = null,
 ) : FrameLayout(context) {
     private val webView: WebView
+    // Set once in init, before the first load.
+    private var reconnectVoiceEnabled = false
     private val loadingSpinner: ProgressBar
     private val visibleWindowFrame = Rect()
     private val windowLocation = IntArray(2)
@@ -181,6 +231,7 @@ class AgentChatView internal constructor(
             WebView.startSafeBrowsing(context) {}
         }
         webView = createWebView()
+        reconnectVoiceEnabled = reconnectVoice != null && addChatMessageListener(reconnectVoice)
         loadingSpinner = ProgressBar(context).apply {
             layoutParams = LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -236,8 +287,11 @@ class AgentChatView internal constructor(
                         this@AgentChatView.filePathCallback = null
                         return false
                     }
-                    val intent = fileChooserParams?.createIntent()
-                        ?: Intent(Intent.ACTION_GET_CONTENT).apply { type = "*/*" }
+                    val intent = createFileChooserIntent(
+                        context = context,
+                        acceptTypes = fileChooserParams?.acceptTypes,
+                        allowMultiple = fileChooserParams?.mode == FileChooserParams.MODE_OPEN_MULTIPLE,
+                    )
                     return try {
                         launcher(intent)
                         true
@@ -263,6 +317,43 @@ class AgentChatView internal constructor(
                 "AndroidSDK",
             )
         }
+    }
+
+    /**
+     * Receives messages from the chat page's main frame only. New bridge messages go here instead
+     * of the `AndroidSDK` JavaScript interface, which every frame can call.
+     */
+    private fun addChatMessageListener(reconnectVoice: ReconnectVoiceAction): Boolean {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
+            return false
+        }
+        val chatUri = Uri.parse(agentConfig.url)
+        val chatOrigin = "${chatUri.scheme}://${chatUri.encodedAuthority}"
+        WebViewCompat.addWebMessageListener(
+            webView,
+            CHAT_MESSAGE_BRIDGE_NAME,
+            setOf(chatOrigin),
+        ) { _, message, _, isMainFrame, _ ->
+            if (!isMainFrame || disposed || message.type != WebMessageCompat.TYPE_STRING) {
+                return@addWebMessageListener
+            }
+            val type = try {
+                JSONObject(message.data ?: return@addWebMessageListener).optString("type")
+            } catch (e: JSONException) {
+                Log.w(TAG, "Ignoring malformed chat message", e)
+                return@addWebMessageListener
+            }
+            when (type) {
+                // Check against the conversation the embed last reported, not page state: a
+                // recreated page or a new chat can still show an older control.
+                "onReconnectVoice" -> if (
+                    resumeState.activeConversationID == withoutTypePrefix(reconnectVoice.conversationID)
+                ) {
+                    reconnectVoice.onReconnect()
+                }
+            }
+        }
+        return true
     }
 
     /** Loads the chat, restoring [savedInstanceState] when it contains compatible WebView state. */
@@ -433,6 +524,9 @@ class AgentChatView internal constructor(
         }
         return JSONObject().put("target", target).apply {
             identity?.let { put("userIdentityToken", it) }
+            if (reconnectVoiceEnabled && reconnectVoice != null) {
+                put("reconnectVoiceConversationID", withoutTypePrefix(reconnectVoice.conversationID))
+            }
         }.toString()
     }
 
@@ -502,6 +596,13 @@ class AgentChatView internal constructor(
             "printTranscriptMenuLabel" to options.saveTranscriptLabel,
             "endConversationMenuLabel" to options.endConversationLabel,
         )
+        options.confirmEndConversationDialogConfirmButtonLabel?.takeIf { it.isNotEmpty() }?.let {
+            chatInterfaceStringsMap["confirmEndConversationDialogConfirmButtonLabel"] = it
+        }
+        val reconnectVoiceLabel = reconnectVoice?.label
+        if (reconnectVoiceEnabled && reconnectVoiceLabel != null) {
+            chatInterfaceStringsMap["reconnectVoiceButtonLabel"] = reconnectVoiceLabel
+        }
         if (options.shouldOmitDefaultChatStrings()) {
             if (options.newChatButtonLabel == AgentChatControllerOptions.DEFAULTS.newChatButtonLabel) {
                 chatInterfaceStringsMap.remove("newChatButtonLabel")
@@ -520,6 +621,9 @@ class AgentChatView internal constructor(
 
         if (options.hideTitleBar) {
             urlBuilder.appendQueryParameter("hideTitleBar", "true")
+        }
+        if (reconnectVoiceEnabled) {
+            urlBuilder.appendQueryParameter("canReconnectToVoice", "true")
         }
         urlBuilder.appendQueryParameter("persistenceMode", "custom")
         val conversationOptions = options.conversationOptions ?: ConversationOptions()
@@ -897,6 +1001,9 @@ class AgentChatView internal constructor(
         pendingAddAgentTagsCallbacks.clear()
         filePathCallback?.onReceiveValue(null)
         filePathCallback = null
+        if (reconnectVoiceEnabled) {
+            WebViewCompat.removeWebMessageListener(webView, CHAT_MESSAGE_BRIDGE_NAME)
+        }
         onDispose?.invoke(this)
     }
 
@@ -1319,7 +1426,12 @@ private class ChatWebViewInterface(
     }
 }
 
+/** Matches the embed's `removeTypePrefix`, which it applies before reporting onConversationStart. */
+private fun withoutTypePrefix(id: String): String = id.substringAfter('-')
+
 private const val TAG = "AgentChatView"
+// Keep in sync with AndroidWindow.SierraAndroidChat in web/sites/embed/pages/agent/{token}/mobile.tsx.
+private const val CHAT_MESSAGE_BRIDGE_NAME = "SierraAndroidChat"
 private const val STATE_PAGE_LOADED = "pageLoaded"
 private const val STATE_BRIDGE_BOOTSTRAP = "bridgeBootstrap"
 private const val STATE_ARGS = "args"

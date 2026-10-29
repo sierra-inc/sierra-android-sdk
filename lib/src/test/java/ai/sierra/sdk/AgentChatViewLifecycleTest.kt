@@ -7,6 +7,10 @@ import android.net.Uri
 import android.os.Looper
 import android.view.ViewGroup
 import android.webkit.ValueCallback
+import android.webkit.WebChromeClient
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.IntentCompat
 import androidx.fragment.app.FragmentActivity
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -114,15 +118,100 @@ class AgentChatViewLifecycleTest {
         val webView = chatView.chatWebView()
         var callbackResult: Array<Uri>? = null
         val callback = ValueCallback<Array<Uri>> { callbackResult = it }
+        val fileChooserParams = object : WebChromeClient.FileChooserParams() {
+            override fun getMode(): Int = MODE_OPEN
+
+            override fun getAcceptTypes(): Array<String> = arrayOf("image/jpeg,image/png")
+
+            override fun isCaptureEnabled(): Boolean = false
+
+            override fun getTitle(): CharSequence? = null
+
+            override fun getFilenameHint(): String? = null
+
+            override fun createIntent(): Intent = error("AgentChatView builds the chooser intent")
+        }
 
         assertTrue(
-            shadowOf(webView).webChromeClient.onShowFileChooser(webView, callback, null),
+            shadowOf(webView).webChromeClient.onShowFileChooser(
+                webView,
+                callback,
+                fileChooserParams,
+            ),
         )
-        assertEquals(Intent.ACTION_GET_CONTENT, launchedIntent?.action)
+        val expectedPhotoPickerIntent = ActivityResultContracts.PickVisualMedia().createIntent(
+            chatView.context,
+            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+        )
+        assertEquals(expectedPhotoPickerIntent.action, launchedIntent?.action)
 
-        val selected = arrayOf(Uri.parse("content://test/attachment"))
+        val selected = arrayOf(Uri.parse("content://media/external/images/media/42"))
         chatView.onFileChooserResult(selected)
         assertArrayEquals(selected, callbackResult)
+    }
+
+    @Test
+    fun fileChooserIntentUsesAcceptedMimeTypes() {
+        val context = Robolectric.buildActivity(FragmentActivity::class.java).setup().get()
+        val expectedPhotoPickerAction = ActivityResultContracts.PickVisualMedia().createIntent(
+            context,
+            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+        ).action
+
+        val imagesOnly = createFileChooserIntent(
+            context,
+            arrayOf(" image/JPEG,IMAGE/png ", "", ".jpg"),
+            allowMultiple = false,
+        )
+        assertEquals(expectedPhotoPickerAction, imagesOnly.action)
+        assertEquals("image/*", imagesOnly.type)
+
+        val mixed = createFileChooserIntent(
+            context,
+            arrayOf(" image/JPEG, application/PDF ", ".docx"),
+            allowMultiple = true,
+        )
+        assertEquals(Intent.ACTION_CHOOSER, mixed.action)
+        val getContent = IntentCompat.getParcelableExtra(
+            mixed,
+            Intent.EXTRA_INTENT,
+            Intent::class.java,
+        )
+        assertEquals(Intent.ACTION_GET_CONTENT, getContent?.action)
+        assertTrue(getContent?.categories?.contains(Intent.CATEGORY_OPENABLE) == true)
+        assertEquals("*/*", getContent?.type)
+        assertArrayEquals(
+            arrayOf("image/jpeg", "application/pdf"),
+            getContent?.getStringArrayExtra(Intent.EXTRA_MIME_TYPES),
+        )
+        assertTrue(getContent?.getBooleanExtra(Intent.EXTRA_ALLOW_MULTIPLE, false) == true)
+        val initialIntents = IntentCompat.getParcelableArrayExtra(
+            mixed,
+            Intent.EXTRA_INITIAL_INTENTS,
+            Intent::class.java,
+        )
+        assertEquals(1, initialIntents?.size)
+        assertEquals(expectedPhotoPickerAction, (initialIntents?.single() as? Intent)?.action)
+
+        val documentsOnly = createFileChooserIntent(
+            context,
+            arrayOf("application/pdf"),
+            allowMultiple = false,
+        )
+        assertEquals(Intent.ACTION_GET_CONTENT, documentsOnly.action)
+        assertArrayEquals(
+            arrayOf("application/pdf"),
+            documentsOnly.getStringArrayExtra(Intent.EXTRA_MIME_TYPES),
+        )
+
+        val empty = createFileChooserIntent(
+            context,
+            arrayOf("", "  ", ".docx"),
+            allowMultiple = false,
+        )
+        assertEquals(Intent.ACTION_GET_CONTENT, empty.action)
+        assertEquals("*/*", empty.type)
+        assertNull(empty.getStringArrayExtra(Intent.EXTRA_MIME_TYPES))
     }
 
     @Test

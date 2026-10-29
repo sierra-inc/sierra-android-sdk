@@ -6,7 +6,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-class MobileRendererMessageBoundaryTest {
+class VoiceRendererMessageBoundaryTest {
     @Test
     fun dispatchesOpenMessageFromAllowedMainFrame() {
         val events = Events()
@@ -75,7 +75,7 @@ class MobileRendererMessageBoundaryTest {
         assertTrue(events.isEmpty())
     }
 
-    private fun boundary(events: Events) = MobileRendererMessageBoundary(
+    private fun boundary(events: Events) = VoiceRendererMessageBoundary(
         allowedOrigin = ALLOWED_ORIGIN,
         onOpen = { events.openCount += 1 },
         onSVPClientEvent = { text, attachments ->
@@ -96,7 +96,7 @@ class MobileRendererMessageBoundaryTest {
         val clientEvents = mutableListOf<ClientEvent>()
         val errors = mutableListOf<Throwable>()
         val links = mutableListOf<String>()
-        val displayModes = mutableListOf<MobileRendererDisplayMode>()
+        val displayModes = mutableListOf<VoiceRendererDisplayMode>()
 
         fun isEmpty() = openCount == 0 &&
             clientEvents.isEmpty() &&

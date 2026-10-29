@@ -300,7 +300,7 @@ internal class VoiceSessionManager(
         }
         when (focusChange) {
             AudioManager.AUDIOFOCUS_LOSS -> {
-                endSessionForExternalAudioInterruption("audio_focus_loss:$focusChange")
+                failSessionForAudioInterruption("audio_focus_loss:$focusChange")
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
@@ -315,13 +315,11 @@ internal class VoiceSessionManager(
         }
     }
 
-    private fun endSessionForExternalAudioInterruption(reason: String) {
-        if (!isSessionRunning) {
-            return
-        }
-        isSystemListeningPaused = true
+    private fun failSessionForAudioInterruption(reason: String) {
+        // Disconnect first, so that a late end_conversation from the old socket cannot end the
+        // session before the user leaves the error screen.
         disconnect(rawReason = reason)
-        mainHandler.post { delegate.onEnd() }
+        mainHandler.post { delegate.onError(VoiceAudioException(VoiceAudioException.Reason.INTERRUPTED)) }
     }
 
     fun connect() {
@@ -966,6 +964,29 @@ internal class VoiceSessionManager(
         // Allocation throws on some devices (for example AudioTrack.Builder.build()), and this
         // runs from the host's main thread, so every step reports a voice error instead.
         try {
+            val manager = AppContextHolder.applicationContext
+                .getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            val focusAttrs = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build()
+            val focusReq = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(focusAttrs)
+                .setOnAudioFocusChangeListener(audioFocusChangeListener)
+                .build()
+            if (manager.requestAudioFocus(focusReq) != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+                throw VoiceAudioException(VoiceAudioException.Reason.UNAVAILABLE)
+            }
+            // Retain audio ownership only after focus is granted, so refused-start cleanup leaves
+            // the existing call's audio mode and route unchanged.
+            audioManager = manager
+            audioFocusRequest = focusReq
+            manager.apply {
+                mode = AudioManager.MODE_IN_COMMUNICATION
+                @Suppress("DEPRECATION")
+                isSpeakerphoneOn = true
+            }
+
             val minRecordSize = AudioRecord.getMinBufferSize(
                 sampleRate,
                 AudioFormat.CHANNEL_IN_MONO,
@@ -1003,25 +1024,6 @@ internal class VoiceSessionManager(
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .setBufferSizeInBytes(minTrackSize)
                 .build()
-
-            audioManager = AppContextHolder.applicationContext
-                .getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-            audioManager?.apply {
-                mode = AudioManager.MODE_IN_COMMUNICATION
-                @Suppress("DEPRECATION")
-                isSpeakerphoneOn = true
-            }
-
-            val focusAttrs = AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                .build()
-            val focusReq = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-                .setAudioAttributes(focusAttrs)
-                .setOnAudioFocusChangeListener(audioFocusChangeListener)
-                .build()
-            audioFocusRequest = focusReq
-            audioManager?.requestAudioFocus(focusReq)
 
             audioRecord?.startRecording()
             enableAudioEffects(audioRecord?.audioSessionId ?: 0)
@@ -1303,6 +1305,17 @@ internal class VoiceSessionManager(
         echoGateBelowCount = 0
         echoGateFloorRms = echoGateInitialFloorRms
     }
+}
+
+/** The device refused audio focus or took it away, so the voice session cannot continue. */
+internal class VoiceAudioException(val reason: Reason) :
+    Exception(
+        when (reason) {
+            Reason.UNAVAILABLE -> "Voice audio unavailable: audio focus request failed"
+            Reason.INTERRUPTED -> "Voice audio interrupted: audio focus lost"
+        }
+    ) {
+    enum class Reason { UNAVAILABLE, INTERRUPTED }
 }
 
 /** SVP `end_conversation` reason for a server-side failure. */
