@@ -79,4 +79,12 @@ class DisclosureMarkdownTest {
         clickLinks(render("[Policy](HTTPS://example.com/Privacy)"))
         assertEquals(listOf("https://example.com/Privacy"), clickedUrls)
     }
+
+    @Test
+    fun customSchemeNeedsSlashesAndIsNotBlocked() {
+        val markdown =
+            "[App](MyApp://action?privacy), [bare](myapp:action), [empty](myapp://), and [js](javascript://alert(1))"
+        assertEquals(listOf("App"), clickLinks(render(markdown)))
+        assertEquals(listOf("myapp://action?privacy"), clickedUrls)
+    }
 }

@@ -462,6 +462,12 @@ data class AgentChatControllerOptions(
      * label. Does not change the action that opens the confirmation.
      */
     var confirmEndConversationDialogConfirmButtonLabel: String? = null,
+
+    /**
+     * Prevent the message input from automatically receiving focus when chat loads.
+     * Defaults to false. Users can still tap the input to focus it and type.
+     */
+    var disableAutoFocus: Boolean = false,
 ) : Parcelable {
     companion object {
         // A baseline instance with the hardcoded English defaults, used to detect which

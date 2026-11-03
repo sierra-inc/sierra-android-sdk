@@ -24,11 +24,16 @@ import org.commonmark.parser.Parser
 
 private val ALLOWED_DISCLOSURE_LINK_SCHEMES = setOf("http", "https", "mailto", "tel")
 
+/** The web list, plus `content` and `intent`. */
+private val BLOCKED_DISCLOSURE_LINK_SCHEMES =
+    setOf("about", "blob", "data", "file", "javascript", "vbscript", "content", "intent")
+
 private val disclosureParser = Parser.builder().enabledBlockTypes(emptySet()).build()
 
 /**
- * Renders the voice disclosure's inline Markdown. Only http, https, mailto, and tel links with a
- * target are tappable and sent to [onLinkClick]; any other link renders as its plain label.
+ * Renders the voice disclosure's inline Markdown. Only http, https, mailto, and tel links, and
+ * other `<scheme>://` links that are not blocked, are tappable when they have a target and are sent
+ * to [onLinkClick]; any other link renders as its plain label.
  */
 internal fun disclosureText(markdown: String, onLinkClick: (Uri) -> Unit): SpannableStringBuilder {
     val builder = SpannableStringBuilder()
@@ -63,8 +68,11 @@ internal fun disclosureText(markdown: String, onLinkClick: (Uri) -> Unit): Spann
         override fun visit(link: Link) {
             // Intent scheme matching is case-sensitive, so send the lowercase scheme.
             val uri = Uri.parse(link.destination).normalizeScheme()
+            val scheme = uri.scheme ?: return visitChildren(link)
             val target = uri.schemeSpecificPart.orEmpty().trimStart('/')
-            if (uri.scheme !in ALLOWED_DISCLOSURE_LINK_SCHEMES || target.isEmpty()) return visitChildren(link)
+            val allowed = scheme in ALLOWED_DISCLOSURE_LINK_SCHEMES ||
+                (scheme !in BLOCKED_DISCLOSURE_LINK_SCHEMES && link.destination.startsWith("$scheme://", ignoreCase = true))
+            if (!allowed || target.isEmpty()) return visitChildren(link)
             span(object : ClickableSpan() {
                 override fun onClick(widget: View) = onLinkClick(uri)
             }) { visitChildren(link) }

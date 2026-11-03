@@ -707,6 +707,9 @@ class AgentChatView internal constructor(
                 options.disclosurePlacement.value,
             )
         }
+        if (options.disableAutoFocus) {
+            urlBuilder.appendQueryParameter("disableAutoFocus", "true")
+        }
         if (options.removeInputDivider) {
             urlBuilder.appendQueryParameter("removeInputDivider", "true")
         }
