@@ -48,6 +48,25 @@ class VoiceRendererMessageBoundaryTest {
     }
 
     @Test
+    fun dispatchesAttachmentRenderedCardFlagAndItsAbsence() {
+        val events = Events()
+        val boundary = boundary(events)
+
+        boundary.onPostMessage(
+            data = """{"type":"onAttachmentRendered","height":120,"cardRendered":true}""",
+            sourceOrigin = ALLOWED_ORIGIN,
+            isMainFrame = true
+        )
+        boundary.onPostMessage(
+            data = """{"type":"onAttachmentRendered","height":160}""",
+            sourceOrigin = ALLOWED_ORIGIN,
+            isMainFrame = true
+        )
+
+        assertEquals(listOf(true, null), events.attachmentRendered)
+    }
+
+    @Test
     fun rejectsMessageFromChildFrame() {
         val events = Events()
         val boundary = boundary(events)
@@ -83,7 +102,8 @@ class VoiceRendererMessageBoundaryTest {
         },
         onError = events.errors::add,
         onLinkClick = events.links::add,
-        onDisplayModeChanged = events.displayModes::add
+        onDisplayModeChanged = events.displayModes::add,
+        onAttachmentRendered = events.attachmentRendered::add
     )
 
     private data class ClientEvent(
@@ -97,12 +117,14 @@ class VoiceRendererMessageBoundaryTest {
         val errors = mutableListOf<Throwable>()
         val links = mutableListOf<String>()
         val displayModes = mutableListOf<VoiceRendererDisplayMode>()
+        val attachmentRendered = mutableListOf<Boolean?>()
 
         fun isEmpty() = openCount == 0 &&
             clientEvents.isEmpty() &&
             errors.isEmpty() &&
             links.isEmpty() &&
-            displayModes.isEmpty()
+            displayModes.isEmpty() &&
+            attachmentRendered.isEmpty()
     }
 
     private companion object {

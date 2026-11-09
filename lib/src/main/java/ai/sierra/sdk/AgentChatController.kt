@@ -468,6 +468,12 @@ data class AgentChatControllerOptions(
      * Defaults to false. Users can still tap the input to focus it and type.
      */
     var disableAutoFocus: Boolean = false,
+
+    /**
+     * Dismiss the on-screen keyboard after submitting a message. Tap the input to type again.
+     * Defaults to false, keeping the input focused after sending.
+     */
+    var dismissKeyboardOnSend: Boolean = false,
 ) : Parcelable {
     companion object {
         // A baseline instance with the hardcoded English defaults, used to detect which

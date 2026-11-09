@@ -686,6 +686,9 @@ class AgentChatView internal constructor(
                 options.initialUserMessageFrequency.value,
             )
         }
+        if (options.dismissKeyboardOnSend) {
+            urlBuilder.appendQueryParameter("dismissKeyboardOnSend", "true")
+        }
         if (options.startAtTop) {
             urlBuilder.appendQueryParameter("startAtTop", "true")
         }

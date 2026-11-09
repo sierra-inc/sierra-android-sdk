@@ -53,6 +53,8 @@ internal interface VoiceRendererDelegate {
     fun onVoiceRendererError(error: Throwable)
     fun onLinkClick(url: Uri)
     fun onDisplayModeChanged(displayMode: VoiceRendererDisplayMode)
+    /** [cardRendered] is null when the page predates the flag. */
+    fun onAttachmentRendered(cardRendered: Boolean?)
 }
 
 internal enum class VoiceRendererDisplayMode {
@@ -66,7 +68,8 @@ internal class VoiceRendererMessageBoundary(
     private val onSVPClientEvent: (String, List<Map<String, Any?>>) -> Unit,
     private val onError: (Throwable) -> Unit,
     private val onLinkClick: (String) -> Unit,
-    private val onDisplayModeChanged: (VoiceRendererDisplayMode) -> Unit
+    private val onDisplayModeChanged: (VoiceRendererDisplayMode) -> Unit,
+    private val onAttachmentRendered: (Boolean?) -> Unit
 ) {
     fun onPostMessage(data: String, sourceOrigin: String, isMainFrame: Boolean) {
         if (!isMainFrame || sourceOrigin != allowedOrigin) {
@@ -105,6 +108,9 @@ internal class VoiceRendererMessageBoundary(
                 }
                 onDisplayModeChanged(displayMode)
             }
+            "onAttachmentRendered" -> onAttachmentRendered(
+                if (message.has("cardRendered")) message.optBoolean("cardRendered", false) else null
+            )
         }
     }
 }
@@ -125,7 +131,8 @@ internal class VoiceRendererView(
         onSVPClientEvent = delegate::onSVPClientEvent,
         onError = delegate::onVoiceRendererError,
         onLinkClick = { delegate.onLinkClick(Uri.parse(it)) },
-        onDisplayModeChanged = delegate::onDisplayModeChanged
+        onDisplayModeChanged = delegate::onDisplayModeChanged,
+        onAttachmentRendered = delegate::onAttachmentRendered
     )
     // The state below is main-thread only: pushes and web messages post through mainHandler, and
     // WebView.evaluateJavascript callbacks land on the UI thread.

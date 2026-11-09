@@ -20,6 +20,7 @@ import ai.sierra.sdk.chatkit.voice.VoiceMuteLevelDisplaying
 import ai.sierra.sdk.chatkit.voice.VoiceTextComposerView
 import ai.sierra.sdk.chatkit.voice.VoiceWaveformView
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -31,6 +32,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.Parcelable
+import android.os.SystemClock
 import android.text.method.LinkMovementMethod
 import android.text.style.ClickableSpan
 import android.util.Log
@@ -280,7 +282,21 @@ public data class AgentVoiceControllerOptions(
     /** Error banner text when the device refuses audio as voice starts, for example during another call. */
     var voiceAudioUnavailableErrorMessage: String = "Voice audio isn't available right now.",
     /** Error banner text when another app takes the audio and ends the voice session. */
-    var voiceAudioInterruptedErrorMessage: String = "Voice ended because another app is using audio."
+    var voiceAudioInterruptedErrorMessage: String = "Voice ended because another app is using audio.",
+    /**
+     * When true, keeps the loading indicator on screen from the start of the voice session until
+     * the agent's first message renders, instead of switching to the waveform and
+     * `voicePlaceholderText` when the greeting starts. The message renders when its first
+     * attachment draws (a loading card counts; an "attachment unavailable" box doesn't) or asks to
+     * go fullscreen. Greeting audio can play while it waits. The wait also ends on a renderer
+     * error, a session error, the end of the call, 5 seconds after greeting audio starts, or 12
+     * seconds after the voice session starts, whichever comes first. When the wait ends, the
+     * screen shows what it would show with this option off. While waiting, the loading screen
+     * uses `backgroundColor` if it is opaque, and the theme's `android:colorBackground` otherwise.
+     * Has no effect when `enableTextInput` is true, since the transcript would show the message
+     * first. Defaults to `false`.
+     */
+    var holdLoadingUntilFirstMessageRenders: Boolean = false
 ) : Parcelable {
     @Deprecated("Use voiceAgentParameters instead.")
     @IgnoredOnParcel
@@ -601,6 +617,28 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, VoiceRende
     private val mainHandler = Handler(Looper.getMainLooper())
     private var initialGreetingFallbackRunnable: Runnable? = null
     private val initialGreetingFallbackDelayMs = 2_000L
+    /**
+     * Set while `holdLoadingUntilFirstMessageRenders` keeps the loading indicator over the renderer.
+     * Retained across configuration changes so the hold neither restarts nor ends early.
+     */
+    private var firstMessageHoldDeadlineUptimeMs: Long? = null
+    private val isHoldingLoadingForFirstMessage: Boolean
+        get() = firstMessageHoldDeadlineUptimeMs != null
+    /** An attachment arrived while the hold was on; the hold defers its reveal. */
+    private var hasAttachmentAwaitingReveal = false
+    private val firstMessageHoldTimeoutRunnable = Runnable { endFirstMessageHold() }
+    @SuppressLint("ClickableViewAccessibility")
+    private val consumeTouchListener = View.OnTouchListener { _, _ -> true }
+    /**
+     * Covers the start turn's lookups, a cold renderer load, and the first card render with
+     * headroom, while still recovering from a missing card before the screen looks stuck.
+     */
+    private val firstMessageHoldTimeoutMs = 12_000L
+    /**
+     * How long the hold continues once greeting audio plays, so an agent that sends no opening
+     * card doesn't leave the spinner up for most of its greeting.
+     */
+    private val firstMessageHoldGreetingGraceMs = 5_000L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -623,6 +661,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, VoiceRende
             latestOutputAudioLevel = retained.latestOutputAudioLevel
             hasReceivedInitialGreeting = retained.hasReceivedInitialGreeting
             hasReceivedInitialAudioMessage = retained.hasReceivedInitialAudioMessage
+            firstMessageHoldDeadlineUptimeMs = retained.firstMessageHoldDeadlineUptimeMs
         }
     }
 
@@ -720,6 +759,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, VoiceRende
 
     override fun onDestroyView() {
         cancelInitialGreetingFallback()
+        mainHandler.removeCallbacks(firstMessageHoldTimeoutRunnable)
         cancelTextComposerKeyboardCallbacks()
         if (activity?.isChangingConfigurations == true && voiceSession != null && !hasShutdownVoiceSession) {
             // The session keeps this fragment as its delegate until the replacement claims it. Terminal
@@ -816,6 +856,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, VoiceRende
         if (options.enableTextInput) {
             ensureRendererLoaded()
         }
+        beginFirstMessageHoldIfNeeded()
         session.connect()
         updateUIForState(VoiceSessionManager.State.CONNECTING)
     }
@@ -830,6 +871,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, VoiceRende
             latestOutputAudioLevel = latestOutputAudioLevel,
             hasReceivedInitialGreeting = hasReceivedInitialGreeting,
             hasReceivedInitialAudioMessage = hasReceivedInitialAudioMessage,
+            firstMessageHoldDeadlineUptimeMs = firstMessageHoldDeadlineUptimeMs,
             discardCloseReason = if (options.continueInChatOnDismiss) {
                 AgentVoiceCloseReason.CONTINUE_IN_CHAT
             } else {
@@ -855,6 +897,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, VoiceRende
         if (options.enableTextInput) {
             ensureRendererLoaded()
         }
+        resumeFirstMessageHoldIfNeeded()
         updateUIForState(session.currentState)
         // onStartReconnecting fired for the previous view, so restore its banner here.
         if (session.isReconnecting && controlState == ControlState.ACTIVE) {
@@ -1606,9 +1649,16 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, VoiceRende
             delegate = this
         )
         rendererView = renderer
-        renderer.visibility = View.GONE
+        // A held renderer stays laid out and drawing under the loading indicator; a hidden WebView
+        // has no size and never reports its first card.
+        renderer.visibility = if (isHoldingLoadingForFirstMessage) View.VISIBLE else View.GONE
+        if (isHoldingLoadingForFirstMessage) {
+            renderer.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+            renderer.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+        }
         contentContainer.addView(
             renderer,
+            if (isHoldingLoadingForFirstMessage) 0 else -1,
             FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
@@ -1669,10 +1719,11 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, VoiceRende
     }
 
     private fun showLoadingState(visible: Boolean) {
-        loadingIndicator.visibility = if (visible) View.VISIBLE else View.GONE
-        placeholderCenterVisual?.view?.visibility = if (visible) View.GONE else View.VISIBLE
-        placeholderLabel.visibility = if (visible) View.GONE else View.VISIBLE
-        if (visible) {
+        val isLoadingVisible = visible || isHoldingLoadingForFirstMessage
+        loadingIndicator.visibility = if (isLoadingVisible) View.VISIBLE else View.GONE
+        placeholderCenterVisual?.view?.visibility = if (isLoadingVisible) View.GONE else View.VISIBLE
+        placeholderLabel.visibility = if (isLoadingVisible) View.GONE else View.VISIBLE
+        if (isLoadingVisible) {
             placeholderWaveform?.resetLevels()
         }
     }
@@ -1722,6 +1773,68 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, VoiceRende
         initialGreetingFallbackRunnable = null
     }
 
+    private fun beginFirstMessageHoldIfNeeded() {
+        if (!options.holdLoadingUntilFirstMessageRenders || options.enableTextInput) {
+            return
+        }
+        firstMessageHoldDeadlineUptimeMs = SystemClock.uptimeMillis() + firstMessageHoldTimeoutMs
+        resumeFirstMessageHoldIfNeeded()
+    }
+
+    /** Covers the renderer and arms the timeout for a hold this view or a previous one started. */
+    private fun resumeFirstMessageHoldIfNeeded() {
+        if (!isHoldingLoadingForFirstMessage) {
+            return
+        }
+        // The cover must be opaque to hide the renderer drawing underneath it.
+        val background = options.voiceStyle.backgroundColor
+        placeholderContainer.setBackgroundColor(
+            if (Color.alpha(background) == 255) background else themeColorBackground()
+        )
+        // Keeps touches from reaching the covered WebView. A touch listener, unlike isClickable, does
+        // not give TalkBack a click action that does nothing.
+        placeholderContainer.setOnTouchListener(consumeTouchListener)
+        ensureRendererLoaded()
+        armFirstMessageHoldTimeout()
+    }
+
+    private fun armFirstMessageHoldTimeout() {
+        val deadline = firstMessageHoldDeadlineUptimeMs ?: return
+        mainHandler.removeCallbacks(firstMessageHoldTimeoutRunnable)
+        mainHandler.postAtTime(firstMessageHoldTimeoutRunnable, deadline)
+    }
+
+    private fun themeColorBackground(): Int {
+        val attributes = requireContext().obtainStyledAttributes(intArrayOf(android.R.attr.colorBackground))
+        return try {
+            attributes.getColor(0, Color.WHITE)
+        } finally {
+            attributes.recycle()
+        }
+    }
+
+    /**
+     * Ends the hold and shows what the screen would show without it: renderer content if an
+     * attachment arrived, otherwise the loading or waveform state the greeting flags imply.
+     */
+    private fun endFirstMessageHold() {
+        if (!isHoldingLoadingForFirstMessage) {
+            return
+        }
+        firstMessageHoldDeadlineUptimeMs = null
+        mainHandler.removeCallbacks(firstMessageHoldTimeoutRunnable)
+        placeholderContainer.background = null
+        placeholderContainer.setOnTouchListener(null)
+        rendererView?.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
+        rendererView?.descendantFocusability = ViewGroup.FOCUS_BEFORE_DESCENDANTS
+        if (hasAttachmentAwaitingReveal) {
+            revealRendererContentIfNeeded()
+        } else {
+            rendererView?.visibility = View.GONE
+        }
+        showLoadingState(!hasReceivedInitialGreeting)
+    }
+
     private fun updateUIForState(state: VoiceSessionManager.State) {
         when (state) {
             VoiceSessionManager.State.CONNECTING -> {
@@ -1740,6 +1853,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, VoiceRende
                 refreshActiveControls()
             }
             VoiceSessionManager.State.ENDED -> {
+                endFirstMessageHold()
                 setReconnectingBannerVisible(false)
                 showLoadingState(false)
                 cancelInitialGreetingFallback()
@@ -1789,6 +1903,7 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, VoiceRende
     }
 
     private fun showErrorState(message: String) {
+        endFirstMessageHold()
         setControlState(ControlState.ERROR_AWAITING_EXIT)
         latestInputAudioLevel = 0f
         latestOutputAudioLevel = 0f
@@ -1860,6 +1975,11 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, VoiceRende
     }
 
     override fun onStartInitialAudioPlayback() {
+        firstMessageHoldDeadlineUptimeMs?.let { deadline ->
+            firstMessageHoldDeadlineUptimeMs =
+                minOf(deadline, SystemClock.uptimeMillis() + firstMessageHoldGreetingGraceMs)
+            armFirstMessageHoldTimeout()
+        }
         markInitialGreetingReceivedIfNeeded()
     }
 
@@ -1990,6 +2110,10 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, VoiceRende
         if (hasShownFirstAttachment) {
             return
         }
+        if (isHoldingLoadingForFirstMessage) {
+            hasAttachmentAwaitingReveal = true
+            return
+        }
         hasShownFirstAttachment = true
         placeholderContainer.visibility = View.GONE
         placeholderWaveform?.resetLevels()
@@ -2069,6 +2193,23 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, VoiceRende
         }
     }
 
+    override fun onAttachmentRendered(cardRendered: Boolean?) {
+        // null comes from renderers that predate `cardRendered`; their first report ends the hold.
+        if (cardRendered == false || !isHoldingLoadingForFirstMessage) {
+            return
+        }
+        endFirstMessageHoldOnRenderedContent()
+    }
+
+    private fun endFirstMessageHoldOnRenderedContent() {
+        // Something drew, so end on it even if its attachment never passed through the reveal gate.
+        hasAttachmentAwaitingReveal = true
+        endFirstMessageHold()
+        // The drawn card stands in for the greeting, so a recreated view does not show the loading
+        // indicator again.
+        markInitialGreetingReceivedIfNeeded()
+    }
+
     override fun onVoiceRendererError(error: Throwable) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
             mainHandler.post { onVoiceRendererError(error) }
@@ -2076,6 +2217,9 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, VoiceRende
         }
         Log.e(VOICE_TAG, "Renderer error", error)
         rendererFailed = true
+        // A failed renderer has nothing to reveal.
+        hasAttachmentAwaitingReveal = false
+        endFirstMessageHold()
         setRendererFullscreen(false)
         rendererView?.visibility = View.GONE
         placeholderContainer.visibility = View.VISIBLE
@@ -2114,10 +2258,13 @@ internal class AgentVoiceFragment : Fragment(), VoiceSessionDelegate, VoiceRende
     }
 
     override fun onDisplayModeChanged(displayMode: VoiceRendererDisplayMode) {
-        setRendererFullscreen(
-            controlState == ControlState.ACTIVE &&
-                displayMode == VoiceRendererDisplayMode.FULLSCREEN
-        )
+        val fullscreen = controlState == ControlState.ACTIVE && displayMode == VoiceRendererDisplayMode.FULLSCREEN
+        // Only a mounted attachment asks for fullscreen, so the request ends the hold like a drawn
+        // card does, and the renderer never goes fullscreen above the cover.
+        if (fullscreen && isHoldingLoadingForFirstMessage) {
+            endFirstMessageHoldOnRenderedContent()
+        }
+        setRendererFullscreen(fullscreen)
     }
 
     private fun canonicalizeForSignature(value: Any?): String {
@@ -2187,6 +2334,7 @@ internal data class RetainedVoiceSession(
     val latestOutputAudioLevel: Float,
     val hasReceivedInitialGreeting: Boolean,
     val hasReceivedInitialAudioMessage: Boolean,
+    val firstMessageHoldDeadlineUptimeMs: Long?,
     private val discardCloseReason: AgentVoiceCloseReason
 ) {
     fun discard(closeReason: AgentVoiceCloseReason = this.discardCloseReason) {

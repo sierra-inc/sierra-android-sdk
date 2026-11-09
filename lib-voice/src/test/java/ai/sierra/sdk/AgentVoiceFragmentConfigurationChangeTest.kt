@@ -10,12 +10,14 @@ import android.Manifest
 import android.os.Looper
 import android.view.View
 import android.view.ViewGroup
+import android.widget.ProgressBar
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStore
 import java.net.InetAddress
+import java.time.Duration
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicInteger
 import okhttp3.Dns
@@ -24,11 +26,13 @@ import okhttp3.WebSocket
 import okio.ByteString
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.json.JSONObject
@@ -102,6 +106,49 @@ class AgentVoiceFragmentConfigurationChangeTest {
         val recreated = currentFragment(activityController)
         assertEquals(View.GONE, recreated.requireView().requireDescendant<MuteButtonPill>().visibility)
         assertEquals(View.VISIBLE, recreated.requireView().requireDescendant<UnmuteButtonPill>().visibility)
+    }
+
+    @Test
+    @Config(
+        shadows = [
+            AgentVoiceFirstMessageHoldTest.ShadowWebViewFeature::class,
+            AgentVoiceFirstMessageHoldTest.ShadowWebViewCompat::class
+        ]
+    )
+    fun firstMessageHoldSurvivesConfigurationChangeWithoutRestartingTimeout() {
+        val (activityController, fragment) = launchFragment(createFirstMessageHoldController())
+        fragment.onStartInitialAudioPlayback()
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(3))
+
+        activityController.recreate()
+        shadowOf(Looper.getMainLooper()).idle()
+
+        val recreated = currentFragment(activityController)
+        val spinner = recreated.requireView().requireDescendant<ProgressBar>()
+        assertTrue(spinner.isShown)
+
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(2_100))
+
+        assertFalse(spinner.isShown)
+    }
+
+    @Test
+    @Config(
+        shadows = [
+            AgentVoiceFirstMessageHoldTest.ShadowWebViewFeature::class,
+            AgentVoiceFirstMessageHoldTest.ShadowWebViewCompat::class
+        ]
+    )
+    fun revealedFirstMessageDoesNotHoldLoadingAfterConfigurationChange() {
+        val (activityController, fragment) = launchFragment(createFirstMessageHoldController())
+        fragment.onReceiveAttachments(listOf(mapOf("type" to "custom", "data" to mapOf("id" to "card-1"))))
+        fragment.onAttachmentRendered(cardRendered = true)
+
+        activityController.recreate()
+        shadowOf(Looper.getMainLooper()).idle()
+
+        val recreated = currentFragment(activityController)
+        assertFalse(recreated.requireView().requireDescendant<ProgressBar>().isShown)
     }
 
     @Test
@@ -239,6 +286,7 @@ class AgentVoiceFragmentConfigurationChangeTest {
             latestOutputAudioLevel = 0f,
             hasReceivedInitialGreeting = false,
             hasReceivedInitialAudioMessage = false,
+            firstMessageHoldDeadlineUptimeMs = null,
             discardCloseReason = AgentVoiceCloseReason.CONTINUE_IN_CHAT
         )
 
@@ -273,6 +321,13 @@ class AgentVoiceFragmentConfigurationChangeTest {
             agent = Agent(AgentConfig(token = "test-token")),
             options = voiceOptions()
         ).also { it.voiceCallbacks = callbacks }
+    }
+
+    private fun createFirstMessageHoldController(): AgentVoiceController {
+        return AgentVoiceController(
+            agent = Agent(AgentConfig(token = "test-token")),
+            options = voiceOptions().apply { holdLoadingUntilFirstMessageRenders = true }
+        )
     }
 
     private fun voiceOptions(): AgentVoiceControllerOptions {
