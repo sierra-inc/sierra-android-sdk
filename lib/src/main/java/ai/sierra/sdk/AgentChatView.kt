@@ -122,6 +122,7 @@ class AgentChatView internal constructor(
 ) : FrameLayout(context) {
     private val webView: WebView
     // Set once in init, before the first load.
+    private var chatMessageListenerAdded = false
     private var reconnectVoiceEnabled = false
     private val loadingSpinner: ProgressBar
     private val visibleWindowFrame = Rect()
@@ -231,7 +232,8 @@ class AgentChatView internal constructor(
             WebView.startSafeBrowsing(context) {}
         }
         webView = createWebView()
-        reconnectVoiceEnabled = reconnectVoice != null && addChatMessageListener(reconnectVoice)
+        chatMessageListenerAdded = addChatMessageListener()
+        reconnectVoiceEnabled = reconnectVoice != null && chatMessageListenerAdded
         loadingSpinner = ProgressBar(context).apply {
             layoutParams = LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -323,7 +325,7 @@ class AgentChatView internal constructor(
      * Receives messages from the chat page's main frame only. New bridge messages go here instead
      * of the `AndroidSDK` JavaScript interface, which every frame can call.
      */
-    private fun addChatMessageListener(reconnectVoice: ReconnectVoiceAction): Boolean {
+    private fun addChatMessageListener(): Boolean {
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
             return false
         }
@@ -347,10 +349,12 @@ class AgentChatView internal constructor(
                 // Check against the conversation the embed last reported, not page state: a
                 // recreated page or a new chat can still show an older control.
                 "onReconnectVoice" -> if (
+                    reconnectVoice != null &&
                     resumeState.activeConversationID == withoutTypePrefix(reconnectVoice.conversationID)
                 ) {
                     reconnectVoice.onReconnect()
                 }
+                "onNewConversation" -> listener?.onNewConversation()
             }
         }
         return true
@@ -1007,7 +1011,7 @@ class AgentChatView internal constructor(
         pendingAddAgentTagsCallbacks.clear()
         filePathCallback?.onReceiveValue(null)
         filePathCallback = null
-        if (reconnectVoiceEnabled) {
+        if (chatMessageListenerAdded) {
             WebViewCompat.removeWebMessageListener(webView, CHAT_MESSAGE_BRIDGE_NAME)
         }
         onDispose?.invoke(this)

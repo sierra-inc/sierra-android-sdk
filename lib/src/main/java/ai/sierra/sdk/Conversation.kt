@@ -76,7 +76,8 @@ interface ConversationEventListener : AgentEventListener {
     fun onExternalAgentJoin(externalConversationID: String?, externalAgentID: String?) {}
 
     /**
-     * Callback invoked when a conversation starts.
+     * Called when a conversation ID becomes available for a new or reopened conversation.
+     * To observe an explicit choice to start fresh before its ID exists, use [onNewConversation].
      *
      * @param conversationID The unique identifier for the conversation.
      */
@@ -92,6 +93,14 @@ interface ConversationEventListener : AgentEventListener {
      * Callback invoked when the conversation ends.
      */
     fun onConversationEnded() {}
+
+    /**
+     * Called when the user explicitly chooses to start a fresh conversation, before its first message
+     * or conversation ID. Includes the post-end button, ChatKit action, and conversation list.
+     * Not invoked on initial opening or when reopening an existing conversation.
+     * Use [onConversationStart] to receive the ID of a new or reopened conversation.
+     */
+    fun onNewConversation() {}
 
     /**
      * Callback invoked when the conversation list is shown.
@@ -165,6 +174,12 @@ internal class MainThreadConversationEventListener(private val listener: Convers
     override fun onConversationEnded() {
         handler.post {
             listener?.onConversationEnded()
+        }
+    }
+
+    override fun onNewConversation() {
+        handler.post {
+            listener?.onNewConversation()
         }
     }
 
