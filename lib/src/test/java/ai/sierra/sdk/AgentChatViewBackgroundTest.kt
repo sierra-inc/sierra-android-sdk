@@ -14,7 +14,8 @@ import org.robolectric.annotation.Config
 
 /**
  * A non-opaque background is painted once by the web embed, so the native views stay transparent.
- * An opaque one still paints natively, which is what avoids a flash while the embed loads.
+ * An opaque one still paints natively, which avoids a flash while the embed loads and fills the top
+ * inset area that the WebView does not cover.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -48,12 +49,12 @@ class AgentChatViewBackgroundTest {
     }
 
     @Test
-    fun serverConfiguredStyleLeavesTheNativeViewsTransparent() {
+    fun serverConfiguredStyleLeavesOnlyTheWebViewTransparent() {
         val chatView = createTestChatView(
             options = optionsWithBackground(Color.WHITE, useConfiguredStyle = true),
         )
 
-        assertEquals(Color.TRANSPARENT, chatView.backgroundColorInt())
+        assertEquals(Color.WHITE, chatView.backgroundColorInt())
         assertEquals(Color.TRANSPARENT, shadowOf(chatView.chatWebView()).backgroundColor)
     }
 

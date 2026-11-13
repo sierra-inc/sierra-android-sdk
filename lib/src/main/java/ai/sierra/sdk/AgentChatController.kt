@@ -112,106 +112,118 @@ data class AgentChatControllerOptions(
     val name: String,
 
     /**
-     * Use chat interface strings configured on the server (greeting, error messages, etc.),
-     * including server-managed locale/direction settings for those strings.
-     * When enabled, server-configured values take precedence over local string options.
+     * Deprecated: Agent Studio chat strings are used by default, and this option will be removed
+     * in a future release. Set chat strings in these options to override Agent Studio instead.
+     * When false, Agent Studio chat strings, including its locale and text direction settings, are
+     * not used.
      */
-    val useConfiguredChatStrings: Boolean = false,
+    @Deprecated(
+        message = "Agent Studio chat strings are used by default, and this option will be removed " +
+            "in a future release. Remove this argument, and set chat strings in " +
+            "AgentChatControllerOptions to override Agent Studio.",
+        level = DeprecationLevel.WARNING,
+    )
+    val useConfiguredChatStrings: Boolean = true,
 
     /**
-     * Use styling configured on the server (colors, typography, logo, etc.).
-     * When enabled, non-empty server-configured style fields take precedence over the corresponding
-     * local fields. Local values remain as fallbacks.
+     * Deprecated: Agent Studio styling is used by default, and this option will be removed in a
+     * future release. Set styles in these options to override Agent Studio instead. When false,
+     * Agent Studio styling (colors, typography, logo, etc.) is not used, and the chat uses only
+     * chatStyle and the other style options.
      */
-    val useConfiguredStyle: Boolean = false,
+    @Deprecated(
+        message = "Agent Studio styling is used by default, and this option will be removed in a " +
+            "future release. Remove this argument, and set chatStyle and the other style options " +
+            "to override Agent Studio.",
+        level = DeprecationLevel.WARNING,
+    )
+    val useConfiguredStyle: Boolean = true,
 
     /**
-     * Message shown from the agent when starting the conversation.
-     * Overridden by server-configured greeting message if useConfiguredChatStrings is true.
+     * Message shown from the agent when starting the conversation. When left at its default, the
+     * Agent Studio value or a translated default is used.
      */
     var greetingMessage: String = "How can I help you today?",
 
     /**
-     * Secondary text to display above the agent message at the start of a conversation.
-     * Overridden by server-configured disclosure if useConfiguredChatStrings is true.
+     * Secondary text to display above the agent message at the start of a conversation. When not
+     * set, the Agent Studio disclosure is used.
      */
     var disclosure: String? = null,
 
     /**
-     * Message shown when an error is encountered during the conversation.
-     * Overridden by server-configured error message if useConfiguredChatStrings is true.
+     * Message shown when an error is encountered during the conversation. When left at its default,
+     * the Agent Studio value or a translated default is used.
      */
     var errorMessage: String = "Oops, an error was encountered! Please try again.",
 
     /**
-     * Message shown when a conversation was ended due to inactivity.
-     * Overridden by server-configured inactivity message if useConfiguredChatStrings is true.
+     * Message shown when a conversation was ended due to inactivity. When left at its default, the
+     * Agent Studio value or a translated default is used.
      */
     var inactivityMessage: String? = null,
 
     /**
-     * Placeholder value displayed in the chat input when it is empty.
-     * Overridden by server-configured input placeholder if useConfiguredChatStrings is true.
-     * Defaults to "Message…" when this value is empty.
+     * Placeholder value displayed in the chat input when it is empty. When left at its default, the
+     * Agent Studio value or a translated default is used. Defaults to "Message…" when this value is
+     * empty.
      */
     var inputPlaceholder: String = "",
 
     /**
-     * Message shown in place of the chat input when the conversation has ended.
-     * Overridden by server-configured ended message if useConfiguredChatStrings is true.
-     * Defaults to "Chat ended" when this value is empty.
+     * Message shown in place of the chat input when the conversation has ended. When left at its
+     * default, the Agent Studio value or a translated default is used. Defaults to "Chat ended"
+     * when this value is empty.
      */
     var conversationEndedMessage: String = "",
 
     /**
-     * Message shown when waiting for a human agent to join the conversation.
-     * Overridden by server-configured waiting message if useConfiguredChatStrings is true.
+     * Message shown when waiting for a human agent to join the conversation. When left at its
+     * default, the Agent Studio value or a translated default is used.
      */
     var agentTransferWaitingMessage: String = "Waiting for agent…",
 
     /**
-     * Message shown when waiting for a human agent to join the conversation, and the queue
-     * size is known. "{QUEUE_SIZE}" will be replaced with the size of the queue. Overridden by
-     * server-configured queue size message if useConfiguredChatStrings is true.
+     * Message shown when waiting for a human agent to join the conversation, and the queue size is
+     * known. "{QUEUE_SIZE}" will be replaced with the size of the queue. When left at its default,
+     * the Agent Studio value or a translated default is used.
      */
     var agentTransferQueueSizeMessage: String = "Queue Size: {QUEUE_SIZE}",
 
     /**
-     * Message shown when waiting for a human agent to join the conversation, and the user is
-     * next in line. Overridden by server-configured queue next message if
-     * useConfiguredChatStrings is true.
+     * Message shown when waiting for a human agent to join the conversation, and the user is next
+     * in line. When left at its default, the Agent Studio value or a translated default is used.
      */
     var agentTransferQueueNextMessage: String = "You are next in line",
 
     /**
-     * Message shown when a human agent has joined the conversation.
-     * Overridden by server-configured joined message if useConfiguredChatStrings is true.
+     * Message shown when a human agent has joined the conversation. When left at its default, the
+     * Agent Studio value or a translated default is used.
      */
     var agentJoinedMessage: String = "Agent connected",
 
     /**
-     * Message shown when a human agent has left the conversation.
-     * Overridden by server-configured left message if useConfiguredChatStrings is true.
+     * Message shown when a human agent has left the conversation. When left at its default, the
+     * Agent Studio value or a translated default is used.
      */
     var agentLeftMessage: String = "Agent disconnected",
 
     /**
-     * Customize the colors and other appearance of the chat UI.
-     * Overridden by server-configured chat style if useConfiguredStyle is true.
+     * Customize the colors and other appearance of the chat UI. Values set here take precedence
+     * over Agent Studio, which provides the rest.
      */
     val chatStyle: ChatStyle = ChatStyle(),
 
     /**
-     * Inline SVG markup for the chat send button. Replaces the default send arrow (including
-     * its background) when provided. When both the SDK and server provide a value, the
-     * server-configured value takes precedence if useConfiguredStyle is true.
+     * Inline SVG markup for the chat send button. Replaces the default send arrow (including its
+     * background) when provided. When set, this value takes precedence over Agent Studio.
      */
     var sendButtonSVG: String? = null,
 
     /**
-     * Inline SVG markup for the send button when it is disabled (e.g. the input is empty).
-     * Falls back to sendButtonSVG when not provided. When both the SDK and server provide a value,
-     * the server-configured value takes precedence if useConfiguredStyle is true.
+     * Inline SVG markup for the send button when it is disabled (e.g. the input is empty). Falls
+     * back to sendButtonSVG when not provided. When set, this value takes precedence over Agent
+     * Studio.
      */
     var sendButtonDisabledSVG: String? = null,
 
@@ -328,53 +340,49 @@ data class AgentChatControllerOptions(
     var removeInputDivider: Boolean = false,
 
     /**
-     * Whether to show timestamps on chat messages. When useConfiguredStyle is true, a non-default
-     * server-configured value takes precedence over this local value.
+     * Whether to show timestamps on chat messages. When set, this value takes precedence over Agent
+     * Studio.
      */
     var showTimestamps: Boolean? = null,
 
     /**
-     * Whether to show speaker labels (e.g. the agent name) on chat messages. When
-     * useConfiguredStyle is true, a non-default server-configured value takes precedence over this
-     * local value.
+     * Whether to show speaker labels (e.g. the agent name) on chat messages. When set, this value
+     * takes precedence over Agent Studio.
      */
     var showSpeakerLabels: Boolean? = null,
 
     /**
-     * Whether to show per-message avatars for agents. When enabled, the chat
-     * shows avatars next to live agent messages using image URLs provided by
-     * the contact center. If agentAvatarURL is also set, that image is shown
-     * next to virtual agent messages. When useConfiguredStyle is true, a non-default
-     * server-configured value takes precedence over this local value.
+     * Whether to show per-message avatars for agents. When enabled, the chat shows avatars next to
+     * live agent messages using image URLs provided by the contact center. If agentAvatarURL is
+     * also set, that image is shown next to virtual agent messages. When set, this value takes
+     * precedence over Agent Studio.
      */
     var showAvatars: Boolean? = null,
 
     /**
-     * HTTPS URL of an image to show next to virtual agent messages when
-     * showAvatars is enabled. Values are trimmed and must be 2048 characters or
-     * fewer. When useConfiguredStyle is true, a non-empty server-configured value takes precedence
-     * over this local value.
+     * HTTPS URL of an image to show next to virtual agent messages when showAvatars is enabled.
+     * Values are trimmed and must be 2048 characters or fewer. When set, this value takes
+     * precedence over Agent Studio.
      */
     var agentAvatarURL: String? = null,
 
     /**
-     * Controls whether the message label (speaker name and timestamp) is shown
-     * above or below chat message bubbles. When useConfiguredStyle is true, a non-default
-     * server-configured value takes precedence over this local value.
+     * Controls whether the message label (speaker name and timestamp) is shown above or below chat
+     * message bubbles. When set, this value takes precedence over Agent Studio.
      */
     var messageLabelPlacement: MessageLabelPlacement = MessageLabelPlacement.DEFAULT,
 
     /**
      * Whether chat interface strings (button labels, tooltips, etc.) and text direction are
-     * automatically localized from the conversation locale at the start of the conversation.
-     * When null and useConfiguredChatStrings is true, the server-configured value is used.
+     * automatically localized from the conversation locale at the start of the conversation. When
+     * null, the Agent Studio setting is used.
      */
     var autoDetectChatStrings: Boolean? = null,
 
     /**
      * Whether chat interface strings (button labels, tooltips, etc.) and text direction are
-     * automatically updated when the agent changes the conversation locale mid-conversation.
-     * When null and useConfiguredChatStrings is true, the server-configured value is used.
+     * automatically updated when the agent changes the conversation locale mid-conversation. When
+     * null, the Agent Studio setting is used.
      */
     var autoUpdateChatStrings: Boolean? = null,
 
@@ -384,10 +392,9 @@ data class AgentChatControllerOptions(
      * - `LTR`: Forces the chat window to use a left-to-right language layout.
      * - `RTL`: Forces the chat window to use a right-to-left language layout.
      * - `AUTO`: Text direction automatically follows the conversation locale.
-     * When null, text direction follows the conversation locale if autoDetectChatStrings is
-     * active or once autoUpdateChatStrings applies a mid-conversation locale change.
-     * Otherwise, follows the Agent Studio "Text direction" setting if
-     * useConfiguredChatStrings is true; otherwise defaults to left-to-right.
+     * When null, text direction follows the conversation locale if autoDetectChatStrings is active
+     * or once autoUpdateChatStrings applies a mid-conversation locale change. Otherwise, follows
+     * the Agent Studio "Text direction" setting, or defaults to left-to-right.
      */
     var textDirection: TextDirection? = null,
 
@@ -436,24 +443,22 @@ data class AgentChatControllerOptions(
     var conversationEndedStyle: ChatConversationEndedStyle? = null,
 
     /**
-     * Whether to hide all chat bubble tails. When useConfiguredStyle is true, a non-default
-     * server-configured value takes precedence over this local value.
+     * Whether to hide all chat bubble tails. When set, this value takes precedence over Agent
+     * Studio.
      */
     var hideBubbleTails: Boolean? = null,
 
     /**
-     * Inline SVG markup for the file upload button icon. Replaces only the default
-     * photo/paperclip glyph; the button keeps its behavior and accessible label. Paths that use
-     * `currentColor` (or omit a fill) take chatStyle.colors.uploadButtonIcon; explicit SVG colors
-     * win. When both the SDK and server provide a value, the server-configured value takes
-     * precedence if useConfiguredStyle is true.
+     * Inline SVG markup for the file upload button icon. Replaces only the default photo/paperclip
+     * glyph; the button keeps its behavior and accessible label. Paths that use `currentColor` (or
+     * omit a fill) take chatStyle.colors.uploadButtonIcon; explicit SVG colors win. When set, this
+     * value takes precedence over Agent Studio.
      */
     var uploadButtonIconSVG: String? = null,
 
     /**
      * Inline SVG markup for the icon shown next to live agent display names. Replaces the default
-     * headset icon when provided. When both the SDK and server provide a value, the
-     * server-configured value takes precedence if useConfiguredStyle is true.
+     * headset icon when provided. When set, this value takes precedence over Agent Studio.
      */
     var liveAgentIconSVG: String? = null,
 
@@ -474,12 +479,14 @@ data class AgentChatControllerOptions(
      * Defaults to false, keeping the input focused after sending.
      */
     var dismissKeyboardOnSend: Boolean = false,
+
+    /** Draw a 1px title-bar divider using chatStyle.colors.border. Defaults to false. */
+    var showTitleBarDivider: Boolean = false,
 ) : Parcelable {
     companion object {
         // A baseline instance with the hardcoded English defaults, used to detect which
-        // fields the caller has actually customized. When locale auto-detect or
-        // server-configured chat strings are enabled, any field still equal to its
-        // default is omitted so locale defaults or server values can take effect.
+        // fields the caller has actually customized. Any field still equal to its default
+        // is omitted so Agent Studio values or locale defaults can take effect.
         internal val DEFAULTS = AgentChatControllerOptions(name = "")
     }
 
@@ -501,19 +508,17 @@ data class AgentChatControllerOptions(
         return greetingMessage != DEFAULTS.greetingMessage
     }
 
+    // The page applies Agent Studio's localization settings when either useConfigured option is on,
+    // so English defaults are sent only when both are off and nothing else localizes.
+    @Suppress("DEPRECATION")
     internal fun shouldOmitDefaultChatStrings(): Boolean {
         return autoDetectChatStrings == true || autoUpdateChatStrings == true ||
-            useConfiguredChatStrings
+            useConfiguredChatStrings || useConfiguredStyle
     }
 
     internal fun shouldUseGreetingMessageAsCustomGreeting(): Boolean {
-        if (greetingMessage.isEmpty()) {
-            return false
-        }
-        if (!shouldOmitDefaultChatStrings()) {
-            return true
-        }
-        return hasCustomGreetingMessage()
+        return greetingMessage.isNotEmpty() &&
+            (hasCustomGreetingMessage() || !shouldOmitDefaultChatStrings())
     }
 }
 

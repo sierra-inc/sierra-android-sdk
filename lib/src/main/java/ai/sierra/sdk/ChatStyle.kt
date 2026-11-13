@@ -9,8 +9,8 @@ import androidx.annotation.ColorInt
 import androidx.annotation.RestrictTo
 
 /**
- * Customize the colors and other appearance of the chat UI. When useConfiguredStyle is true in
- * AgentChatControllerOptions, these settings are overridden by server-configured settings.
+ * Customize the colors and other appearance of the chat UI. Values set here take precedence over
+ * Agent Studio, which provides the rest.
  */
 @Parcelize
 data class ChatStyle (
@@ -32,8 +32,8 @@ data class ChatStyle (
 }
 
 /**
- * Typography settings for chat UI. When useConfiguredStyle is true in AgentChatControllerOptions,
- * these settings are overridden by server-configured typography.
+ * Typography settings for chat UI. Values set here take precedence over Agent Studio, which
+ * provides the rest.
  */
 @Parcelize
 data class ChatStyleTypography(
@@ -161,8 +161,8 @@ data class ChatTextStyle(
 }
 
 /**
- * Color settings for chat UI. When useConfiguredStyle is true in AgentChatControllerOptions, these
- * settings are overridden by server-configured colors.
+ * Color settings for chat UI. Values set here take precedence over Agent Studio, which provides the
+ * rest.
  *
  * Values are `@ColorInt` ARGB integers, so use `Color.argb(alpha, red, green, blue)` (or
  * `Color.rgb(...)` / `Color.parseColor("#RRGGBB")` for an opaque color) rather than a bare

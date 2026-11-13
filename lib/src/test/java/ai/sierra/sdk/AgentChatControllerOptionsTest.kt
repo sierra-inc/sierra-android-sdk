@@ -137,6 +137,24 @@ class AgentChatControllerOptionsTest {
     }
 
     @Test
+    fun sendsOnlyAppSetValues() {
+        val url = loadedUrl(
+            AgentChatControllerOptions(
+                name = "",
+                errorMessage = "Try again",
+                chatStyle = ChatStyle(colors = ChatStyleColors(userBubble = 0xFF3F51B5.toInt())),
+            ),
+        )
+
+        assertEquals("true", url.getQueryParameter("explicitBrand"))
+        assertEquals("{}", url.getQueryParameter("chatInterfaceStrings"))
+        val brand = JSONObject(url.getQueryParameter("brand")!!)
+        assertEquals(setOf("errorMessage", "chatStyle"), brand.keys().asSequence().toSet())
+        val colors = JSONObject(brand.getString("chatStyle")).getJSONObject("colors")
+        assertEquals(setOf("userBubble"), colors.keys().asSequence().toSet())
+    }
+
+    @Test
     fun confirmEndConversationModeDefaultsToAlwaysAndIsOmittedFromUrl() {
         val options = AgentChatControllerOptions(name = "Test")
 

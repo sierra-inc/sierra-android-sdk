@@ -93,7 +93,10 @@ internal fun createFileChooserIntent(
     }
 }
 
-/** The native loading color. The web embed owns server-configured and translucent backgrounds. */
+/**
+ * The native loading color. With Agent Studio styling, the web embed paints the background, as it
+ * does for translucent backgrounds.
+ */
 @ColorInt
 private fun nativeBackgroundColor(
     @ColorInt background: Int?,
@@ -200,8 +203,11 @@ class AgentChatView internal constructor(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
         )
-        nativeBackgroundColor(options.chatStyle.colors.background, options.useConfiguredStyle)
-            ?.let { setBackgroundColor(it) }
+        // An opaque app background fills the top inset area, which the WebView does not cover.
+        setBackgroundColor(
+            options.chatStyle.colors.background?.takeIf { Color.alpha(it) == 255 }
+                ?: Color.TRANSPARENT,
+        )
         ViewCompat.setOnApplyWindowInsetsListener(this) { _, windowInsets ->
             val systemBarsType = WindowInsetsCompat.Type.systemBars()
             val displayCutoutType = WindowInsetsCompat.Type.displayCutout()
@@ -258,7 +264,9 @@ class AgentChatView internal constructor(
             // preventing transient web loading states from flashing onscreen.
             alpha = 0f
             // Set background color to match chat style to avoid white flash while loading
-            nativeBackgroundColor(options.chatStyle.colors.background, options.useConfiguredStyle)
+            @Suppress("DEPRECATION")
+            val useConfiguredStyle = options.useConfiguredStyle
+            nativeBackgroundColor(options.chatStyle.colors.background, useConfiguredStyle)
                 ?.let { setBackgroundColor(it) }
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
@@ -541,20 +549,29 @@ class AgentChatView internal constructor(
             urlBuilder.appendQueryParameter("target", agentConfig.target)
         }
 
-        // Should match the web embed's Brand shape.
+        // Should match the web embed's Brand shape. With explicitBrand=true, the web embed treats
+        // every value here as set by the app, so it beats Agent Studio. Send only values the app
+        // changed from their defaults.
         val brandMap = mutableMapOf<String, Any>(
-            "botName" to options.name,
             "greetingMessage" to options.greetingMessage,
             "errorMessage" to options.errorMessage,
-            "inactivityMessage" to (options.inactivityMessage ?: ""),
             "agentTransferWaitingMessage" to options.agentTransferWaitingMessage,
             "agentTransferQueueSizeMessage" to options.agentTransferQueueSizeMessage,
             "agentTransferQueueNextMessage" to options.agentTransferQueueNextMessage,
             "agentJoinedMessage" to options.agentJoinedMessage,
             "agentLeftMessage" to options.agentLeftMessage,
-            "chatStyle" to JSONObject(options.chatStyle.toJSON()).toString(),
-            "messageLabelPlacement" to options.messageLabelPlacement.value,
         )
+        if (options.name.isNotEmpty()) {
+            brandMap["botName"] = options.name
+        }
+        options.inactivityMessage?.let { brandMap["inactivityMessage"] = it }
+        if (options.messageLabelPlacement != MessageLabelPlacement.DEFAULT) {
+            brandMap["messageLabelPlacement"] = options.messageLabelPlacement.value
+        }
+        val appStyle = options.chatStyle.toJSON()
+        if (appStyle.containsKey("type") || (appStyle["colors"] as Map<*, *>).isNotEmpty()) {
+            brandMap["chatStyle"] = JSONObject(appStyle).toString()
+        }
         options.showTimestamps?.let { brandMap["showTimestamps"] = it }
         options.showSpeakerLabels?.let { brandMap["showBotName"] = it }
         options.showAvatars?.let { brandMap["showAvatars"] = it }
@@ -564,8 +581,7 @@ class AgentChatView internal constructor(
         options.sendButtonDisabledSVG?.let { brandMap["sendButtonDisabledSVG"] = it }
         options.uploadButtonIconSVG?.let { brandMap["uploadButtonIconSVG"] = it }
         options.liveAgentIconSVG?.let { brandMap["liveAgentIconSVG"] = it }
-        // If locale auto-detect or server-configured chat strings are enabled, remove any messages
-        // that are set to their default value so server-configured values or locale defaults can win.
+        // Remove messages set to their default value so Agent Studio values or locale defaults can win.
         if (options.shouldOmitDefaultChatStrings()) {
             if (!options.hasCustomGreetingMessage()) {
                 brandMap.remove("greetingMessage")
@@ -593,13 +609,17 @@ class AgentChatView internal constructor(
 
         // Subset of the web embed's chat UI strings.
         val chatInterfaceStringsMap = mutableMapOf(
-            "inputPlaceholder" to options.inputPlaceholder,
-            "disclosure" to (options.disclosure ?: ""),
-            "conversationEndedMessage" to options.conversationEndedMessage,
             "newChatButtonLabel" to options.newChatButtonLabel,
             "printTranscriptMenuLabel" to options.saveTranscriptLabel,
             "endConversationMenuLabel" to options.endConversationLabel,
         )
+        options.inputPlaceholder.takeIf { it.isNotEmpty() }?.let {
+            chatInterfaceStringsMap["inputPlaceholder"] = it
+        }
+        options.disclosure?.let { chatInterfaceStringsMap["disclosure"] = it }
+        options.conversationEndedMessage.takeIf { it.isNotEmpty() }?.let {
+            chatInterfaceStringsMap["conversationEndedMessage"] = it
+        }
         options.confirmEndConversationDialogConfirmButtonLabel?.takeIf { it.isNotEmpty() }?.let {
             chatInterfaceStringsMap["confirmEndConversationDialogConfirmButtonLabel"] = it
         }
@@ -717,6 +737,9 @@ class AgentChatView internal constructor(
         if (options.disableAutoFocus) {
             urlBuilder.appendQueryParameter("disableAutoFocus", "true")
         }
+        if (options.showTitleBarDivider) {
+            urlBuilder.appendQueryParameter("showTitleBarDivider", "true")
+        }
         if (options.removeInputDivider) {
             urlBuilder.appendQueryParameter("removeInputDivider", "true")
         }
@@ -729,12 +752,17 @@ class AgentChatView internal constructor(
         options.conversationEndedStyle?.toJSONString()?.let {
             urlBuilder.appendQueryParameter("conversationEndedStyle", it)
         }
+        // Embed pages treat a missing param as off, which older SDKs rely on.
+        @Suppress("DEPRECATION")
         if (options.useConfiguredChatStrings) {
             urlBuilder.appendQueryParameter("useConfiguredChatStrings", "true")
         }
+        @Suppress("DEPRECATION")
         if (options.useConfiguredStyle) {
             urlBuilder.appendQueryParameter("useConfiguredStyle", "true")
         }
+        // brand and chatInterfaceStrings hold only values the app set (see their construction).
+        urlBuilder.appendQueryParameter("explicitBrand", "true")
         if (options.autoDetectChatStrings != null) {
             urlBuilder.appendQueryParameter(
                 "autoDetectChatStrings",
